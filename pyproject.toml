@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "browseterm-server-local"
+version = "0.1.0"
+description = "Browseterm LOCAL control plane: browser-facing server + Desktop Resource MVP. See README.md's P06 architecture-correction note."
+authors = ["Zim95 <shresthanamah@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.12"
+ipython = "8.12.0"
+grpcio = "^1.70.0"
+fastapi = "^0.115.11"
+uvicorn = "0.33.0"
+httpx = "^0.28.1"
+grpcio-tools = "1.70.0"
+container-maker-spec = {git = "https://github.com/Zim95/container-maker-spec.git", rev = "main"}
+payment-gateway-spec = {git = "https://github.com/Zim95/payment-gateway-spec.git", rev = "main"}
+paramiko = "^3.5.1"
+websocket-client = "^1.8.0"
+kubernetes = "^32.0.1"
+jinja2 = "^3.1.2"
+redis = "^5.0.0"
+browseterm-db = {git = "https://github.com/Zim95/browseterm-db.git", rev = "main"}
+# Desktop Resource MVP (P06) - Mac-only menu-bar app microframework, smallest available
+# packaging footprint for this narrow machine/resource-manager scope.
+rumps = {version = "^0.4.0", markers = "sys_platform == 'darwin'"}
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
