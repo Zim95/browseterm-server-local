@@ -1,9 +1,15 @@
 # browseterm-server-local
 
-**Local control plane.** Serves the existing Browseterm browser UI, talks to local
-ContainerMaker/Socket-SSH/Kubernetes, and (new in P06) ships the Mac Desktop Resource MVP. Must
-never hold Cloud PostgreSQL/Redis credentials for central state - see "Trust boundary" below for
-what that actually means today vs. the target end-state.
+**Local control plane.** Serves the existing Browseterm browser UI and talks to local
+ContainerMaker/Socket-SSH/Kubernetes. Must never hold Cloud PostgreSQL/Redis credentials for
+central state - see "Trust boundary" below for what that actually means today vs. the target
+end-state. Runs inside a separate Local k3s cluster (`browseterm-k3s-local`) from Cloud's
+(`browseterm-k3s`) - see plan section 2 and `browseterm-monorepo` for cluster bootstrap.
+
+The Mac Desktop Resource MVP (auth + device registration + resource allocation) lives in its own
+repository, [`browseterm-desktop`](https://github.com/Zim95/browseterm-desktop) - it was
+originally built here during P06 and split out to match this project's one-component-per-repo
+convention.
 
 ## Architecture correction (P06)
 
@@ -17,7 +23,8 @@ corrected that into two physically separate repositories:
   served, extracted as-is (a clean initial commit - not a history-preserving split, since the
   Local-owned files were scattered across the tree and several files needed to be *duplicated*
   rather than moved; see `p.md`'s P06 section in the main planning tree for the full rationale),
-  plus two genuinely new P06 additions: `src/cloud_client/` and `desktop/`.
+  plus one genuinely new P06 addition: `src/cloud_client/` (the Desktop Resource MVP was also
+  built here originally, then split into `browseterm-desktop`).
 
 ## Trust boundary
 
@@ -35,55 +42,31 @@ Cloud-API replacements are explicitly later tasks:
 | `src/status_listener.py` (Postgres LISTEN/NOTIFY -> SSE) | P10 (Cloud SSE) |
 | `src/api_handlers.py`, `src/db_ops/container_db_ops.py`, `src/db_ops/image_db_ops.py` (container/workspace CRUD) | P12/P13 (Cloud workspace metadata/create APIs, Local create path) |
 
-**The one new P06 code path is exempt from this by construction**: `src/cloud_client/` and
-`desktop/` never import `browseterm_db`, `src.common.config.DB_CONFIG`, or any
-`POSTGRES_*`/`REDIS_*` setting - they talk to Cloud exclusively over HTTPS through
-`src.cloud_client.CloudClient`. Do not add a DB/Redis import to either package; if a future task
+**This one new P06 code path is exempt from this by construction**: `src/cloud_client/` never
+imports `browseterm_db`, `src.common.config.DB_CONFIG`, or any `POSTGRES_*`/`REDIS_*` setting -
+it talks to Cloud exclusively over HTTPS. Do not add a DB/Redis import to it; if a future task
 needs one, that's a sign it belongs back in the legacy tree above, not here.
 
 ## `src/cloud_client/` - the Local -> Cloud boundary
 
 ```
-Local Handler -> CloudClient -> HTTPS -> Cloud browseterm-server
+Local Handler -> CloudClient -> HTTPS -> Cloud browseterm-server (browseterm.cloud.com)
 ```
 
-The only intended way Local/Desktop code reaches central Cloud state. Currently wraps just the
+The only intended way this repo's code reaches central Cloud state. Currently wraps just the
 P05 Device Cloud API (register/list/get/update/heartbeat) - do not add unrelated Cloud endpoints
-here without a corresponding Cloud API existing first.
+here without a corresponding Cloud API existing first. `browseterm-desktop` has its own,
+deliberately duplicated copy of this same package for the identical reason - see that repo's
+README.
+
+Default `BROWSETERM_CLOUD_API_URL` is `http://browseterm.cloud.com:9999` (Cloud's DNS
+convention, mirroring `browseterm.local.com` for Local); override for local development against
+a Cloud instance on this machine.
 
 Auth is interim (pre-P07): `CloudClient` takes the same opaque `session` cookie value the
 browser already holds after logging in through this repo's existing OAuth flow (Cloud and Local
 share one Redis pre-P07). See `src/cloud_client/client.py`'s module docstring for the full
 rationale and what P07 replaces it with.
-
-## `desktop/` - Desktop Resource MVP (P06)
-
-Mac-only menu-bar app - a machine/runtime/resource manager, **not** the Browseterm workspace UI
-(no workspace list/create/terminal UI; that stays in the browser). Built with
-[`rumps`](https://github.com/jaredks/rumps) - the smallest available Mac menu-bar app
-microframework, chosen over any cross-platform packaging framework (Electron/Tauri/etc) since
-this repo's stack is already all-Python/poetry and Windows/Linux desktop support is explicitly
-out of scope (plan section 20).
-
-Responsibilities: detect macOS/architecture/CPU/memory/storage (`desktop/hardware.py`, stable
-stdlib/`sysctl`/`shutil` calls only - no GUI-output parsing), edit the Browseterm allocation with
-client-side validation as defense-in-depth (`desktop/allocation.py` - P05's server-side
-validation is authoritative), register/update the device and send heartbeats through
-`CloudClient` (`desktop/device_registration.py` - handles P05's real, non-idempotent 409
-duplicate semantics by finding and updating the existing device instead), report (not manage)
-local server/k3s health (`desktop/runtime_health.py`), and open Browseterm in the system browser.
-
-Run it:
-```
-poetry install
-export BROWSETERM_SESSION_COOKIE=<value of the "session" cookie after logging in via the browser>
-poetry run python -m desktop.app
-```
-
-`BROWSETERM_LOCAL_URL` (default `http://browseterm.local.com:9999`, matching this repo's own
-`AUTH_REDIRECT_BASE_URI`/`INGRESS_HOST` convention) and `BROWSETERM_CLOUD_API_URL` (default
-`http://localhost:9999` - no production Cloud hostname exists yet anywhere in these repos, P22
-owns that) are both overridable env vars.
 
 ## Cloning the repository
 ```
@@ -243,9 +226,8 @@ poetry install
 poetry run python -m unittest discover -s tests/integration -p "test_*.py"
 ```
 
-## New backend unit tests (P06: `cloud_client`, `desktop`)
-Standalone - every OS/network boundary is mocked (`sysctl`/`shutil`/`subprocess`/`httpx`), no
-live Postgres/Redis/Cloud instance needed:
+## New backend unit tests (P06: `cloud_client`)
+Standalone - the HTTP boundary is mocked (`httpx`), no live Postgres/Redis/Cloud instance needed:
 ```
 poetry install
 poetry run python -m pytest tests/unit/ -v

@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "browseterm-server-local"
 version = "0.1.0"
-description = "Browseterm LOCAL control plane: browser-facing server + Desktop Resource MVP. See README.md's P06 architecture-correction note."
+description = "Browseterm LOCAL control plane: the browser-facing server. See README.md's P06 architecture-correction note."
 authors = ["Zim95 <shresthanamah@gmail.com>"]
 readme = "README.md"
 
@@ -21,9 +21,6 @@ kubernetes = "^32.0.1"
 jinja2 = "^3.1.2"
 redis = "^5.0.0"
 browseterm-db = {git = "https://github.com/Zim95/browseterm-db.git", rev = "main"}
-# Desktop Resource MVP (P06) - Mac-only menu-bar app microframework, smallest available
-# packaging footprint for this narrow machine/resource-manager scope.
-rumps = {version = "^0.4.0", markers = "sys_platform == 'darwin'"}
 
 
 [build-system]
