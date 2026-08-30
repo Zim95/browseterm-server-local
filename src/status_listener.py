@@ -1,38 +1,38 @@
 """
-Status listener service using PGListener for container status changes.
-Provides SSE endpoint for real-time status updates to frontend.
+Status listener service - now polls Cloud's container API instead of listening to Postgres
+NOTIFY directly. Provides the same SSE endpoint (api_handlers.container_status_sse) for
+real-time-ish status updates to the frontend.
+
+This is a deliberate simplification, not the final design: real-time (NOTIFY-driven) push is
+P10's job (Cloud SSE) - Cloud would own the LISTEN/NOTIFY connection itself (it's allowed direct
+Postgres access) and either push to Local over a server-sent stream or Local would subscribe to
+Cloud's own SSE endpoint. Until that lands, this keeps Local's "no DB client at all" invariant by
+polling Cloud's existing GET /containers HTTP API on an interval and diffing against the last
+known state per user, at the cost of up to POLL_INTERVAL_SECONDS of latency instead of instant
+push.
 """
 
 import asyncio
-import json
 from typing import Dict, Set, Optional
 from collections import defaultdict
 import threading
 
-from browseterm_db.common.pg_listener import (
-    PGListener,
-    CONTAINER_STATUS_CHANGE_CHANNEL,
-    CONTAINER_SAVE_STATUS_CHANGE_CHANNEL,
-    ContainerStatusChangePayload,
-    ContainerSaveStatusChangePayload
-)
-
-from src.common.config import (
-    POSTGRES_HOST,
-    POSTGRES_PORT,
-    POSTGRES_USER,
-    POSTGRES_PASSWORD,
-    POSTGRES_DB
-)
+from src.cloud_client.client import CloudClient, CloudClientError
 from src.common.logging_setup import get_logger
 
 logger = get_logger("status_listener")
 
+POLL_INTERVAL_SECONDS = 3.0
+
+# Fields whose change is worth telling the frontend about, and which SSE event type they map to.
+_STATUS_FIELDS = ("status",)
+_SAVE_STATUS_FIELDS = ("save_status", "saved_image", "save_error", "last_saved_at", "last_save_attempted_at")
+
 
 class StatusListenerService:
     """
-    Singleton service that listens for container status changes via PostgreSQL NOTIFY
-    and broadcasts them to connected SSE clients.
+    Singleton service that polls Cloud's container API on an interval and broadcasts changes to
+    connected SSE clients, grouped by user_id.
     """
     _instance: Optional['StatusListenerService'] = None
     _lock = threading.Lock()
@@ -50,129 +50,90 @@ class StatusListenerService:
             return
 
         self._initialized = True
-        self._listener: Optional[PGListener] = None
         self._running = False
+        self._poll_task: Optional[asyncio.Task] = None
 
         # Map of user_id -> set of asyncio.Queue for SSE clients
         self._client_queues: Dict[str, Set[asyncio.Queue]] = defaultdict(set)
         self._queues_lock = threading.Lock()
 
-        # Event loop reference for cross-thread communication
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Last-seen container snapshots per user, to diff against on each poll.
+        self._last_seen: Dict[str, Dict[str, dict]] = {}
 
     def start(self, loop: asyncio.AbstractEventLoop = None):
-        """Start the PGListener in a background thread."""
+        """Start the background polling task."""
         if self._running:
             return
-
-        self._loop = loop or asyncio.get_event_loop()
-
-        self._listener = PGListener(
-            host=POSTGRES_HOST,
-            port=POSTGRES_PORT,
-            user=POSTGRES_USER,
-            password=POSTGRES_PASSWORD,
-            database=POSTGRES_DB
-        )
-        self._listener.connect()
-        self._listener.listen(CONTAINER_STATUS_CHANGE_CHANNEL, self._handle_status_change)
-        self._listener.listen(CONTAINER_SAVE_STATUS_CHANGE_CHANNEL, self._handle_save_status_change)
-        self._listener.run_in_thread()
         self._running = True
-        logger.info(
-            "StatusListenerService started",
-            extra={"channels": [CONTAINER_STATUS_CHANGE_CHANNEL, CONTAINER_SAVE_STATUS_CHANGE_CHANNEL]},
-        )
+        self._poll_task = asyncio.ensure_future(self._poll_loop(), loop=loop)
+        logger.info("StatusListenerService started (polling, interval=%ss)", POLL_INTERVAL_SECONDS)
 
     def stop(self):
-        """Stop the PGListener."""
-        if self._listener:
-            self._listener.disconnect()
-            self._listener = None
+        """Stop the background polling task."""
+        if self._poll_task:
+            self._poll_task.cancel()
+            self._poll_task = None
         self._running = False
         logger.info("StatusListenerService stopped")
 
-    def _handle_status_change(self, payload: str):
-        """
-        Handle incoming status change notification from PostgreSQL.
-        This runs in the PGListener thread, so we need to use thread-safe
-        communication to the asyncio event loop.
-        """
+    async def _poll_loop(self):
+        client = CloudClient()
+        while True:
+            try:
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                with self._queues_lock:
+                    user_ids = list(self._client_queues.keys())
+                for user_id in user_ids:
+                    await self._poll_user(client, user_id)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.error("status poll iteration failed", exc_info=True)
+
+    async def _poll_user(self, client: CloudClient, user_id: str) -> None:
         try:
-            data = ContainerStatusChangePayload.from_json(payload)
-            logger.info(
-                "status change",
-                extra={
-                    "container_id": data.id,
-                    "container_name": data.name,
-                    "old_status": data.old_status,
-                    "new_status": data.new_status,
-                },
-            )
+            containers = await asyncio.to_thread(client.list_containers, user_id)
+        except CloudClientError:
+            logger.error("status poll: list_containers failed", extra={"user_id": user_id}, exc_info=True)
+            return
 
-            # Broadcast to all clients subscribed to this user_id
-            user_id = data.user_id
-            message = {
-                'type': 'status_change',
-                'container_id': data.id,
-                'user_id': data.user_id,
-                'name': data.name,
-                'old_status': data.old_status,
-                'new_status': data.new_status,
-                'updated_at': data.updated_at
-            }
+        previous = self._last_seen.get(user_id, {})
+        current = {c["id"]: c for c in containers}
+        self._last_seen[user_id] = current
 
-            with self._queues_lock:
-                queues = self._client_queues.get(user_id, set()).copy()
+        for container_id, row in current.items():
+            old_row = previous.get(container_id)
+            if old_row is None:
+                continue  # first time seeing this container - nothing to diff against yet
+            if any(old_row.get(f) != row.get(f) for f in _STATUS_FIELDS):
+                self._broadcast(user_id, {
+                    'type': 'status_change',
+                    'container_id': container_id,
+                    'user_id': user_id,
+                    'name': row.get('name'),
+                    'old_status': old_row.get('status'),
+                    'new_status': row.get('status'),
+                    'updated_at': row.get('updated_at'),
+                })
+            if any(old_row.get(f) != row.get(f) for f in _SAVE_STATUS_FIELDS):
+                self._broadcast(user_id, {
+                    'type': 'save_status_change',
+                    'container_id': container_id,
+                    'user_id': user_id,
+                    'name': row.get('name'),
+                    'save_status': row.get('save_status'),
+                    'saved_image': row.get('saved_image'),
+                    'save_error': row.get('save_error'),
+                    'last_saved_at': row.get('last_saved_at'),
+                    'last_save_attempted_at': row.get('last_save_attempted_at'),
+                    'updated_at': row.get('updated_at'),
+                })
 
-            if queues and self._loop:
-                for queue in queues:
-                    # Schedule the put on the event loop thread
-                    self._loop.call_soon_threadsafe(
-                        lambda q=queue, m=message: q.put_nowait(m)
-                    )
-
-        except Exception:
-            logger.error("error handling status change", exc_info=True)
-
-    def _handle_save_status_change(self, payload: str):
-        """
-        Handle incoming SAVE status change notification from PostgreSQL and broadcast
-        it to the user's SSE clients (same queues as pod-status changes, distinguished
-        by the 'save_status_change' type).
-        """
-        try:
-            data = ContainerSaveStatusChangePayload.from_json(payload)
-            logger.info(
-                "save status change",
-                extra={"container_id": data.id, "container_name": data.name, "save_status": data.save_status},
-            )
-
-            user_id = data.user_id
-            message = {
-                'type': 'save_status_change',
-                'container_id': data.id,
-                'user_id': data.user_id,
-                'name': data.name,
-                'save_status': data.save_status,
-                'saved_image': data.saved_image,
-                'save_error': data.save_error,
-                'last_saved_at': data.last_saved_at,
-                'last_save_attempted_at': data.last_save_attempted_at,
-                'updated_at': data.updated_at
-            }
-
-            with self._queues_lock:
-                queues = self._client_queues.get(user_id, set()).copy()
-
-            if queues and self._loop:
-                for queue in queues:
-                    self._loop.call_soon_threadsafe(
-                        lambda q=queue, m=message: q.put_nowait(m)
-                    )
-
-        except Exception:
-            logger.error("error handling save status change", exc_info=True)
+    def _broadcast(self, user_id: str, message: dict) -> None:
+        with self._queues_lock:
+            queues = self._client_queues.get(user_id, set()).copy()
+        for queue in queues:
+            queue.put_nowait(message)
 
     def subscribe(self, user_id: str) -> asyncio.Queue:
         """
@@ -195,6 +156,7 @@ class StatusListenerService:
                 self._client_queues[user_id].discard(queue)
                 if not self._client_queues[user_id]:
                     del self._client_queues[user_id]
+                    self._last_seen.pop(user_id, None)
         logger.info("client unsubscribed", extra={"user_id": user_id})
 
 

@@ -32,16 +32,17 @@ class TestResumeContainer(TestCase):
     Handler-level tests for api_handlers.resume_container.
 
     We call the UNDECORATED handler via resume_container.__wrapped__ (the
-    @authenticate_session decorator uses functools.wraps) so no Redis session is needed,
-    and patch ContainerOps + ContainerService at their import site in src.api_handlers so
-    no live Postgres or gRPC/k8s is touched (the repo's "mock the boundary" convention).
+    @authenticate_session decorator uses functools.wraps) so no Cloud session validation is
+    needed, and patch get_container_by_id/update_container_fields/ContainerService at their
+    import site in src.api_handlers so no live Cloud API, gRPC, or k8s is touched (the repo's
+    "mock the boundary" convention).
     '''
 
     def setUp(self) -> None:
         self.container_id: str = 'container-123'
         self.saved_image: str = 'registry/my-container:snap'
 
-        # Stored DB row for a HIBERNATED container that WAS saved.
+        # Stored container row for a HIBERNATED container that WAS saved.
         self.row: dict = {
             'id': self.container_id,
             'user_id': 'user-42',
@@ -71,31 +72,29 @@ class TestResumeContainer(TestCase):
         )
 
     def _run_resume(self, body: dict):
-        mock_ops: MagicMock = MagicMock()
-        mock_ops.find_one.return_value = SimpleNamespace(data=self.row)
-        mock_ops.update.return_value = SimpleNamespace(data=None)
-
         mock_service: MagicMock = MagicMock()
         mock_service.create_container_in_k8s = AsyncMock(return_value=self.response)
 
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops), \
+        with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=self.row)), \
+             patch('src.api_handlers.update_container_fields', AsyncMock()) as mock_update, \
              patch('src.api_handlers.ContainerService', return_value=mock_service):
             result = asyncio.run(
                 api_handlers.resume_container.__wrapped__(request=_mock_request(body))
             )
-        return result, mock_ops, mock_service
+        return result, mock_update, mock_service
 
-    def _final_update_data(self, mock_ops: MagicMock) -> dict:
-        '''The data dict of the ops.update call that set status=RUNNING (the final sync).'''
-        for call in mock_ops.update.call_args_list:
-            data = call.kwargs.get('data', {})
-            if data.get('status') == ContainerStatus.RUNNING:
-                return data
+    def _final_update_data(self, mock_update: MagicMock) -> dict:
+        '''The fields dict of the update_container_fields call that set status=RUNNING (the
+        final sync).'''
+        for call in mock_update.call_args_list:
+            fields = call.args[2]
+            if fields.get('status') == ContainerStatus.RUNNING:
+                return fields
         raise AssertionError('resume_container never issued the final RUNNING update')
 
     def test_resume_recreates_pod_from_saved_image(self) -> None:
         '''A HIBERNATED container with a saved_image is recreated FROM that snapshot.'''
-        result, _ops, mock_service = self._run_resume({'container_id': self.container_id})
+        result, _update, mock_service = self._run_resume({'container_id': self.container_id})
         self.assertEqual(result.status_code, 200)
         mock_service.create_container_in_k8s.assert_called_once()
         self.assertEqual(
@@ -109,8 +108,8 @@ class TestResumeContainer(TestCase):
         the NEW ip_address + kubernetes_id and status RUNNING. The bug was ip_address not
         being updated, leaving the terminal dialing the deleted pod's IP (SSH handshake timeout).
         '''
-        _result, mock_ops, _service = self._run_resume({'container_id': self.container_id})
-        data = self._final_update_data(mock_ops)
+        _result, mock_update, _service = self._run_resume({'container_id': self.container_id})
+        data = self._final_update_data(mock_update)
         self.assertEqual(data['ip_address'], self.response.container_ip)   # 10.0.0.99, not 10.0.0.5
         self.assertNotEqual(data['ip_address'], self.row['ip_address'])
         self.assertEqual(data['kubernetes_id'], self.response.container_id)
@@ -119,19 +118,17 @@ class TestResumeContainer(TestCase):
 
     def test_resume_marks_resuming_before_recreate(self) -> None:
         '''The row flips to RESUMING before the (slow) recreate so the UI can show progress.'''
-        _result, mock_ops, _service = self._run_resume({'container_id': self.container_id})
-        statuses = [c.kwargs.get('data', {}).get('status') for c in mock_ops.update.call_args_list]
+        _result, mock_update, _service = self._run_resume({'container_id': self.container_id})
+        statuses = [c.args[2].get('status') for c in mock_update.call_args_list]
         self.assertIn(ContainerStatus.RESUMING, statuses)
         self.assertLess(statuses.index(ContainerStatus.RESUMING),
                         statuses.index(ContainerStatus.RUNNING))
 
     def test_resume_missing_container_returns_404(self) -> None:
         '''No row -> 404, and k8s is never touched.'''
-        mock_ops: MagicMock = MagicMock()
-        mock_ops.find_one.return_value = SimpleNamespace(data=None)
         mock_service: MagicMock = MagicMock()
         mock_service.create_container_in_k8s = AsyncMock()
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops), \
+        with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=None)), \
              patch('src.api_handlers.ContainerService', return_value=mock_service):
             result = asyncio.run(
                 api_handlers.resume_container.__wrapped__(request=_mock_request({'container_id': 'nope'}))
@@ -147,13 +144,13 @@ class TestResumeContainer(TestCase):
         is kubelet-driven and lives in container-maker, not here.
         '''
         self.row['status'] = ContainerStatus.UNKNOWN.value
-        result, mock_ops, mock_service = self._run_resume({'container_id': self.container_id})
+        result, mock_update, mock_service = self._run_resume({'container_id': self.container_id})
         self.assertEqual(result.status_code, 200)
         self.assertEqual(
             mock_service.create_container_in_k8s.call_args.kwargs['image_name_override'],
             self.saved_image,
         )
-        self.assertEqual(self._final_update_data(mock_ops)['status'], ContainerStatus.RUNNING)
+        self.assertEqual(self._final_update_data(mock_update)['status'], ContainerStatus.RUNNING)
 
 
 class TestCountActiveContainers(TestCase):
@@ -169,40 +166,39 @@ class TestCountActiveContainers(TestCase):
         ]
 
     def test_counts_running_pending_resuming_only(self) -> None:
-        mock_ops = MagicMock()
-        mock_ops.find.return_value = SimpleNamespace(success=True, data=self._rows([
+        rows = self._rows([
             ('a', ContainerStatus.RUNNING.value),
             ('b', ContainerStatus.PENDING.value),
             ('c', ContainerStatus.RESUMING.value),
             ('d', ContainerStatus.HIBERNATED.value),
             ('e', ContainerStatus.FAILED.value),
-        ]))
-        count = asyncio.run(api_handlers._count_active_containers(mock_ops, 'user-42', exclude_container_id='none'))
+        ])
+        with patch('src.api_handlers.list_user_containers_db', AsyncMock(return_value=rows)):
+            count = asyncio.run(api_handlers._count_active_containers('user-42', exclude_container_id='none'))
         self.assertEqual(count, 3)
 
     def test_excludes_the_container_being_resumed(self) -> None:
-        mock_ops = MagicMock()
-        mock_ops.find.return_value = SimpleNamespace(success=True, data=self._rows([
+        rows = self._rows([
             ('target', ContainerStatus.RUNNING.value),
             ('other', ContainerStatus.RUNNING.value),
-        ]))
-        count = asyncio.run(api_handlers._count_active_containers(mock_ops, 'user-42', exclude_container_id='target'))
+        ])
+        with patch('src.api_handlers.list_user_containers_db', AsyncMock(return_value=rows)):
+            count = asyncio.run(api_handlers._count_active_containers('user-42', exclude_container_id='target'))
         self.assertEqual(count, 1)
 
     def test_excludes_soft_deleted_rows(self) -> None:
-        mock_ops = MagicMock()
-        mock_ops.find.return_value = SimpleNamespace(success=True, data=self._rows(
+        rows = self._rows(
             [('a', ContainerStatus.RUNNING.value), ('b', ContainerStatus.RUNNING.value)],
             deleted_ids={'b'},
-        ))
-        count = asyncio.run(api_handlers._count_active_containers(mock_ops, 'user-42', exclude_container_id='none'))
+        )
+        with patch('src.api_handlers.list_user_containers_db', AsyncMock(return_value=rows)):
+            count = asyncio.run(api_handlers._count_active_containers('user-42', exclude_container_id='none'))
         self.assertEqual(count, 1)
 
     def test_raises_on_db_error(self) -> None:
-        mock_ops = MagicMock()
-        mock_ops.find.return_value = SimpleNamespace(success=False, error='db down', data=None)
-        with self.assertRaises(Exception):
-            asyncio.run(api_handlers._count_active_containers(mock_ops, 'user-42', exclude_container_id='none'))
+        with patch('src.api_handlers.list_user_containers_db', AsyncMock(side_effect=Exception('db down'))):
+            with self.assertRaises(Exception):
+                asyncio.run(api_handlers._count_active_containers('user-42', exclude_container_id='none'))
 
 
 class TestExceedsTierSpec(TestCase):
@@ -273,29 +269,26 @@ class TestResumeEntitlementChecks(TestCase):
         }
 
     def _run(self, plan: dict, active_rows: list):
-        mock_ops = MagicMock()
-        mock_ops.find_one.return_value = SimpleNamespace(data=self.row)
-        mock_ops.update.return_value = SimpleNamespace(data=None)
-        mock_ops.find.return_value = SimpleNamespace(success=True, data=active_rows)
-
         mock_service = MagicMock()
         mock_service.create_container_in_k8s = AsyncMock(return_value=ContainerResponseModel(
             container_name='my-container', container_id='new-pod-uid', container_ip='10.0.0.99',
             container_network='user-42-namespace', container_ports=[], associated_resources=[],
         ))
 
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops), \
+        with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=self.row)), \
+             patch('src.api_handlers.update_container_fields', AsyncMock()), \
+             patch('src.api_handlers.list_user_containers_db', AsyncMock(return_value=active_rows)), \
              patch('src.api_handlers.ContainerService', return_value=mock_service), \
              patch('src.api_handlers.get_user_current_subscription_plan', AsyncMock(return_value=plan)):
             result = asyncio.run(
                 api_handlers.resume_container.__wrapped__(request=_mock_request({'container_id': self.container_id}))
             )
-        return result, mock_ops, mock_service
+        return result, mock_service
 
     def test_blocks_when_over_container_limit(self) -> None:
         '''Free plan, max_containers=1, user already has one Running -> 409, k8s never touched.'''
         active_rows = [{'id': 'other-container', 'status': ContainerStatus.RUNNING.value, 'deleted_at': None}]
-        result, _ops, mock_service = self._run(self.free_plan, active_rows)
+        result, mock_service = self._run(self.free_plan, active_rows)
         self.assertEqual(result.status_code, 409)
         self.assertIn('Free Plan', result.body.decode())
         mock_service.create_container_in_k8s.assert_not_called()
@@ -303,22 +296,22 @@ class TestResumeEntitlementChecks(TestCase):
     def test_blocks_when_spec_exceeds_current_plan(self) -> None:
         '''Container recorded 2 CPU (e.g. saved under a higher tier), current plan only allows 1.'''
         self.row['cpu_limit'] = '2'
-        result, _ops, mock_service = self._run(self.free_plan, active_rows=[])
+        result, mock_service = self._run(self.free_plan, active_rows=[])
         self.assertEqual(result.status_code, 409)
         self.assertIn('ineligible', result.body.decode())
         mock_service.create_container_in_k8s.assert_not_called()
 
     def test_allows_resume_within_plan_limits(self) -> None:
         '''No other active containers, spec fits -- resume proceeds exactly as before.'''
-        result, _ops, mock_service = self._run(self.free_plan, active_rows=[])
+        result, mock_service = self._run(self.free_plan, active_rows=[])
         self.assertEqual(result.status_code, 200)
         mock_service.create_container_in_k8s.assert_called_once()
 
     def test_resumed_container_itself_not_counted_against_its_own_limit(self) -> None:
-        '''The row being resumed is HIBERNATED, but even if find() somehow still returned it,
-        it must be excluded from its own limit check by id.'''
+        '''The row being resumed is HIBERNATED, but even if list_user_containers_db somehow
+        still returned it, it must be excluded from its own limit check by id.'''
         active_rows = [{'id': self.container_id, 'status': ContainerStatus.HIBERNATED.value, 'deleted_at': None}]
-        result, _ops, mock_service = self._run(self.free_plan, active_rows)
+        result, mock_service = self._run(self.free_plan, active_rows)
         self.assertEqual(result.status_code, 200)
         mock_service.create_container_in_k8s.assert_called_once()
 
@@ -332,13 +325,14 @@ class TestSaveContainerHandler(TestCase):
 
     def setUp(self) -> None:
         self.container_id: str = 'container-123'
+        self.user_id: str = 'user-42'
 
     def test_save_marks_pending_and_returns_202(self) -> None:
-        mock_ops: MagicMock = MagicMock()
-        mock_ops.update.return_value = SimpleNamespace(data=None)
         mock_service: MagicMock = MagicMock()
         mock_service.save_container_in_k8s = AsyncMock(return_value=MagicMock())
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops), \
+        with patch('src.api_handlers.get_container_by_id',
+                   AsyncMock(return_value={'id': self.container_id, 'user_id': self.user_id})), \
+             patch('src.api_handlers.update_container_fields', AsyncMock()) as mock_update, \
              patch('src.api_handlers.ContainerService', return_value=mock_service):
             result = asyncio.run(
                 api_handlers.save_container.__wrapped__(
@@ -348,8 +342,8 @@ class TestSaveContainerHandler(TestCase):
                 )
             )
         self.assertEqual(result.status_code, 202)
-        pending = [c.kwargs['data'] for c in mock_ops.update.call_args_list
-                   if c.kwargs.get('data', {}).get('save_status') == SaveStatus.PENDING.value]
+        pending = [c.args[2] for c in mock_update.call_args_list
+                   if c.args[2].get('save_status') == SaveStatus.PENDING.value]
         self.assertTrue(pending, 'save_container did not mark save_status=PENDING')
         self.assertIn(
             'last_save_attempted_at', pending[0],
@@ -357,14 +351,12 @@ class TestSaveContainerHandler(TestCase):
         )
 
     def test_run_save_records_failed_on_grpc_error(self) -> None:
-        mock_ops: MagicMock = MagicMock()
-        mock_ops.update.return_value = SimpleNamespace(data=None)
         mock_service: MagicMock = MagicMock()
         mock_service.save_container_in_k8s = AsyncMock(side_effect=RuntimeError('boom'))
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops):
-            asyncio.run(api_handlers._run_save(mock_service, MagicMock(), self.container_id))
-        failed = [c.kwargs['data'] for c in mock_ops.update.call_args_list
-                  if c.kwargs.get('data', {}).get('save_status') == SaveStatus.FAILED.value]
+        with patch('src.api_handlers.update_container_fields', AsyncMock()) as mock_update:
+            asyncio.run(api_handlers._run_save(mock_service, MagicMock(), self.container_id, self.user_id))
+        failed = [c.args[2] for c in mock_update.call_args_list
+                  if c.args[2].get('save_status') == SaveStatus.FAILED.value]
         self.assertTrue(failed, '_run_save did not record save_status=FAILED')
         self.assertIn('boom', failed[0]['save_error'])
         self.assertNotIn(
@@ -384,21 +376,19 @@ class TestContainerActivity(TestCase):
         req: MagicMock = MagicMock(spec=Request)
         req.json = AsyncMock(return_value=body)
         req.state.user_info = SimpleNamespace(id=user_id)
-        mock_ops: MagicMock = MagicMock()
-        mock_ops.update.return_value = SimpleNamespace(data=None)
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops):
+        with patch('src.api_handlers.update_container_fields', AsyncMock()) as mock_update:
             result = asyncio.run(api_handlers.container_activity.__wrapped__(request=req))
-        return result, mock_ops
+        return result, mock_update
 
     def test_stamps_last_active_at_scoped_to_user(self) -> None:
-        result, mock_ops = self._run({'container_id': 'c-1'})
+        result, mock_update = self._run({'container_id': 'c-1'})
         self.assertEqual(result.status_code, 200)
-        mock_ops.update.assert_called_once()
-        kwargs = mock_ops.update.call_args.kwargs
-        self.assertEqual(kwargs['filters'], {"id": "c-1", "user_id": "user-42"})
-        self.assertIn('last_active_at', kwargs['data'])
+        mock_update.assert_called_once()
+        container_id, user_id, fields = mock_update.call_args.args
+        self.assertEqual((container_id, user_id), ("c-1", "user-42"))
+        self.assertIn('last_active_at', fields)
 
     def test_missing_container_id_is_400(self) -> None:
-        result, mock_ops = self._run({})
+        result, mock_update = self._run({})
         self.assertEqual(result.status_code, 400)
-        mock_ops.update.assert_not_called()
+        mock_update.assert_not_called()

@@ -1,6 +1,5 @@
 # builtins
 from typing import Dict, Any, Optional
-import asyncio
 from functools import wraps
 
 # modules
@@ -9,102 +8,60 @@ from fastapi.responses import RedirectResponse
 
 # local
 from src.common.logging_setup import set_request_context
-from src.authentication.session_manager import RedisSessionManager
-from src.db_ops.user_db_ops import create_or_update_user
-from src.db_ops.subscription_db_ops import get_or_create_free_subscription, get_current_subscription_plan
+from src.cloud_client.client import CloudClient, CloudClientError
 
 # dtos
-from src.authentication.dto.session_dto import SessionDataModel, SessionResponseModel, SessionValidationModel
+from src.authentication.dto.session_dto import SessionResponseModel
 from src.authentication.dto.user_info_dto import UserInfoModel
-from src.authentication.data_transformers.session_transformer import SessionInputTransformer, SessionResponseTransformer
-from src.db_ops.dto.user_dto import CreateOrUpdateUserModel
-from src.db_ops.dto.subscription_dto import GetOrCreateSubscriptionModel, GetSubscriptionPlanModel
-
-
-def create_session(session_data: SessionDataModel) -> str:
-    '''
-    Create a session for the user.
-    Args:
-        session_data: SessionDataModel containing session information
-    Returns:
-        str: Session ID
-    Raises:
-        Exception: If session creation fails
-    '''
-    try:
-        session_manager: RedisSessionManager = RedisSessionManager()
-        session_id: str = session_manager.create_session(session_data)
-        return session_id
-    except Exception as e:
-        print(f"Error creating session: {e}")
-        raise Exception(f"Error creating session: {str(e)}")
-
-
-def extend_session(session_id: str, expiry: int | None = None) -> None:
-    '''
-    Extend the session expiry.
-    Args:
-        session_id: Session ID to extend
-        expiry: Expiry time in seconds (defaults to 30 minutes)
-    '''
-    try:
-        session_manager: RedisSessionManager = RedisSessionManager()
-        session_manager.extend_session(session_id, expiry)
-    except Exception as e:
-        print(f"Error extending session: {e}")
-        raise Exception(f"Error extending session: {str(e)}")
 
 
 async def process_user_info(user_info: UserInfoModel) -> SessionResponseModel:
     '''
-    Process user info.
-    1. Create or update the user in the database
-    2. Get or create a free subscription for the user
-    3. Create a session for the user
-    Args:
-        user_info: UserInfoModel containing user information
-    Returns:
-        SessionResponseModel containing user info and session id
+    Turn a verified OAuth profile into a session.
+
+    Local no longer creates/updates the user row, resolves their subscription, or writes the
+    Redis session itself - Cloud's POST /auth/sessions does all of that (it's the only process
+    allowed to touch Postgres/Redis). Local's job is just the OAuth token exchange that produced
+    `user_info` (see oauth_service.py) and handing the resulting verified profile to Cloud.
+
     Raises:
-        Exception: If session creation fails
+        Exception: if the Cloud session-creation call fails
     '''
     try:
-        # Convert UserInfoModel to CreateOrUpdateUserModel for database operations
-        create_user_model = CreateOrUpdateUserModel(
-            provider_id=user_info.provider_id,
-            provider=user_info.provider.value if hasattr(user_info.provider, 'value') else user_info.provider,
-            name=user_info.name,
-            email=user_info.email,
-            profile_picture_url=user_info.profile_picture_url
-        )
-        # Database operations
-        updated_user_info: Dict[str, Any] = await create_or_update_user(create_user_model)
-        subscription_info: Dict[str, Any] = await get_or_create_free_subscription(
-            GetOrCreateSubscriptionModel(user_id=updated_user_info['id'])
-        )
-        current_subscription_plan: Dict[str, Any] = await get_current_subscription_plan(
-            GetSubscriptionPlanModel(
-                subscription_id=subscription_info['id'],
-                subscription_type_id=subscription_info['subscription_type_id']
-            )
-        )
-        # Create session data model
-        session_data: SessionDataModel = SessionInputTransformer.transform({
-            'user_info': updated_user_info,
-            'subscription_info': subscription_info,
-            'current_subscription_plan': current_subscription_plan
-        })
-        # Create session
-        session_id: str = await asyncio.to_thread(create_session, session_data)
-        # Return SessionResponseModel
-        return SessionResponseTransformer.transform(session_id, {
-            'user_info': updated_user_info,
-            'subscription_info': subscription_info,
-            'current_subscription_plan': current_subscription_plan
-        })
+        client = CloudClient()
+        payload = user_info.model_dump(mode="json")
+        response = client.create_session(payload)
+        return SessionResponseModel(**response)
+    except CloudClientError as e:
+        raise Exception(f"Error creating session: {e.message}")
     except Exception as e:
-        print(f"Error processing user info: {e}")
         raise Exception(f"Error processing user info: {str(e)}")
+
+
+async def validate_session(session_id: str) -> Dict[str, Any]:
+    '''
+    Ask Cloud whether this session is still valid, extending it on success (Cloud's
+    /auth/sessions/validate does both in one call - matching the previous decorator's
+    validate-then-extend behavior).
+
+    Returns the raw {"is_valid": bool, "user_info"?, "subscription_info"?,
+    "current_subscription_plan"?} dict - never raises for an invalid/expired session, only for a
+    genuine Cloud-call failure.
+    '''
+    try:
+        client = CloudClient()
+        return client.validate_session(session_id)
+    except CloudClientError:
+        return {"is_valid": False}
+
+
+async def delete_session(session_id: str) -> None:
+    '''Ask Cloud to delete this session (logout).'''
+    try:
+        client = CloudClient()
+        client.delete_session(session_id)
+    except CloudClientError as e:
+        raise Exception(f"Error deleting session: {e.message}")
 
 
 # this decorator can be used to authenticate the session
@@ -112,7 +69,7 @@ def authenticate_session(func: callable) -> callable:
     @wraps(func)
     async def wrapper(*args: tuple, **kwargs: dict) -> any:
         '''
-        Authenticate the request using Redis session.
+        Authenticate the request by asking Cloud to validate the session cookie.
         If not authenticated, redirect to login page.
         '''
         request: Request = kwargs.get('request')
@@ -120,30 +77,24 @@ def authenticate_session(func: callable) -> callable:
         if not session_id:
             return RedirectResponse(url="/login", status_code=302)
 
-        session_manager: RedisSessionManager = RedisSessionManager()
+        validation: Dict[str, Any] = await validate_session(session_id)
 
-        # Validate session using the new validate_session method
-        validation: SessionValidationModel = session_manager.validate_session(session_id)
-
-        if not validation.is_valid or not validation.session_data:
+        if not validation.get("is_valid") or not validation.get("user_info"):
             return RedirectResponse(url="/login", status_code=302)
-
-        # Session is valid, extend it
-        extend_session(session_id, expiry=1800)  # 30 minutes
 
         # Set the logging correlation context for this request: accept an inbound X-Request-Id
         # (else mint one) and record the acting user, so every log line in this handler — and any
         # gRPC call it makes — is tagged with the same request_id + user for cross-service tracing.
-        ui = validation.session_data.user_info
+        ui = validation["user_info"]
         set_request_context(
             request_id=request.headers.get("X-Request-Id"),
-            user=f"{getattr(ui, 'name', None) or 'user'}:{getattr(ui, 'email', None) or '-'}",
+            user=f"{ui.get('name') or 'user'}:{ui.get('email') or '-'}",
         )
 
         # Add session data to request.state
-        request.state.user_info = validation.session_data.user_info
-        request.state.subscription_info = validation.session_data.subscription_info
-        request.state.current_subscription_plan = validation.session_data.current_subscription_plan
+        request.state.user_info = validation["user_info"]
+        request.state.subscription_info = validation.get("subscription_info", {})
+        request.state.current_subscription_plan = validation.get("current_subscription_plan", {})
         request.state.session_id = session_id
         return await func(*args, **kwargs)
     return wrapper

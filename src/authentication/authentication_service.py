@@ -15,13 +15,16 @@ import json
 
 # local services
 from src.authentication.oauth_service import GoogleUserInfoService, GithubUserInfoService
-from src.authentication.session_manager import RedisSessionManager
-from src.authentication.authentication_helpers import process_user_info, extend_session
+from src.authentication.authentication_helpers import (
+    delete_session,
+    process_user_info,
+    validate_session as validate_session_via_cloud,
+)
 
 # dtos
 from src.authentication.dto.user_info_dto import UserInfoModel
 from src.authentication.dto.token_exchange_dto import TokenExchangeRequestModel
-from src.authentication.dto.session_dto import SessionResponseModel, SessionValidationModel
+from src.authentication.dto.session_dto import SessionResponseModel
 from src.authentication.dto.login_response_dto import LoginResponseModel
 from src.authentication.dto.logout_dto import LogoutResponseModel
 
@@ -44,7 +47,6 @@ class AuthenticationService:
         '''
         Initialize the authentication service.
         '''
-        self.session_manager: RedisSessionManager = RedisSessionManager()
         self.google_service: GoogleUserInfoService = GoogleUserInfoService()
         self.github_service: GithubUserInfoService = GithubUserInfoService()
 
@@ -128,9 +130,9 @@ class AuthenticationService:
             HTTPException: On logout failure
         '''
         try:
-            # Delete session from Redis if session_id provided
+            # Delete session (via Cloud) if session_id provided
             if session_id:
-                self.session_manager.delete_session(session_id)
+                await delete_session(session_id)
             # Create logout response
             logout_data: LogoutResponseModel = LogoutResponseModel(
                 message="Logged out successfully",
@@ -154,26 +156,17 @@ class AuthenticationService:
             logger.error("logout error", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
-    def validate_session(self, session_id: str) -> SessionValidationModel:
+    async def validate_session(self, session_id: str) -> dict:
         '''
-        Validate a session.
-        
+        Validate a session via Cloud (also extends it on success - see
+        authentication_helpers.validate_session).
+
         Args:
             session_id: Session ID to validate
         Returns:
-            SessionValidationModel with validation result
+            {"is_valid": bool, "user_info"?, "subscription_info"?, "current_subscription_plan"?}
         '''
-        return self.session_manager.validate_session(session_id)
-
-    def extend_session_ttl(self, session_id: str, expiry: Optional[int] = None) -> None:
-        '''
-        Extend session TTL.
-        
-        Args:
-            session_id: Session ID to extend
-            expiry: Optional expiry time in seconds
-        '''
-        extend_session(session_id, expiry)
+        return await validate_session_via_cloud(session_id)
 
 
 class GoogleAuthenticationService(AuthenticationService):

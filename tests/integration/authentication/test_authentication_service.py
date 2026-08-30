@@ -308,15 +308,14 @@ class TestGithubAuthenticationService(TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result.provider, AuthProvider.GITHUB)
 
-    @patch('redis.Redis')
-    def test_logout_success(self, mock_redis_class) -> None:
+    @patch('src.authentication.authentication_helpers.CloudClient')
+    def test_logout_success(self, mock_client_class) -> None:
         '''
         Test successful logout.
         '''
-        # Mock Redis
-        mock_redis: MagicMock = MagicMock()
-        mock_redis.delete = MagicMock(return_value=1)
-        mock_redis_class.return_value = mock_redis
+        # Mock the Cloud session-delete call (logout no longer touches Redis directly).
+        mock_client: MagicMock = MagicMock()
+        mock_client_class.return_value = mock_client
 
         # Execute
         response: Response = self.loop.run_until_complete(self.service.logout(session_id='test-session-123'))

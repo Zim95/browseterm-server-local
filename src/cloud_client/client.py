@@ -1,5 +1,5 @@
 """
-The ONLY intended boundary through which Local code talks to central Cloud state (P06).
+The ONLY intended boundary through which Local code talks to central Cloud state.
 
     Local Handler
           |
@@ -9,26 +9,28 @@ The ONLY intended boundary through which Local code talks to central Cloud state
         HTTPS
           |
           v
-    Cloud browseterm-server
+    Cloud browseterm-server (browseterm.cloud.com)
 
-Deliberately narrow: only the P05 Device Cloud API surface P06/Desktop actually needs
-(register/list/get/update/heartbeat). Do not add unrelated Cloud endpoints here without a
-corresponding Cloud API existing first - see p.md's P06 "IMPORTANT MIGRATION-SCOPE RULE" note.
+As of this task, Local holds no PostgreSQL/Redis client at all - every read or write of central
+state (sessions, users, containers, images, subscriptions) goes through here. Two different auth
+modes, matching who's asking:
 
-Auth (interim, pre-P07): the plan's final design (section 8) has Desktop reuse Cloud OAuth
-through the system browser and receive a device-scoped credential via a one-time local
-handoff/loopback callback - that handoff does not exist yet (it's P07's job), and p06.md
-forbids inventing JWT/PKI/mTLS/API keys here. So callers supply the same opaque Redis
-session-cookie value the browser already holds after logging in via Local's existing OAuth
-flow; Cloud and Local currently share one Redis (documented in p.md's P05 section), so that
-cookie validates against Cloud's `authenticate_session` decorator unchanged. This is a
-placeholder - P07 replaces it with the real device-scoped credential flow.
+- Device Cloud API (register/list/get/update/heartbeat, P05): called by Desktop directly, with
+  the end user's own session cookie.
+- Session/container/catalog/subscription API (this task): called by Local's own backend
+  server-to-server. Local has already turned an OAuth code into a verified profile itself, and -
+  after the first session-creation call - already knows the authenticated user_id from Cloud's
+  own session validation. These routes are gated by a shared secret
+  (CLOUD_INTERNAL_API_TOKEN / X-Internal-Service-Token) instead of a session cookie. This is
+  interim: the real fix is moving OAuth entirely onto Cloud (plan section 7.1 / P07), which
+  removes the need for Cloud to trust a caller's word for who the user is at all - tracked there,
+  not solved here.
 """
 from typing import Any, Optional
 
 import httpx
 
-from src.cloud_client.config import BROWSETERM_CLOUD_API_URL, SESSION_COOKIE_NAME
+from src.cloud_client.config import BROWSETERM_CLOUD_API_URL, CLOUD_INTERNAL_API_TOKEN, SESSION_COOKIE_NAME
 
 
 class CloudClientError(Exception):
@@ -41,16 +43,18 @@ class CloudClientError(Exception):
 
 
 class CloudClient:
-    """Thin authenticated HTTP client for the Cloud Device API (P05)."""
+    """Thin authenticated HTTP client for the Cloud API."""
 
     def __init__(
         self,
         base_url: str = BROWSETERM_CLOUD_API_URL,
         session_cookie: Optional[str] = None,
+        internal_token: str = CLOUD_INTERNAL_API_TOKEN,
         timeout: float = 10.0,
     ):
         self._base_url = base_url.rstrip("/")
         self._session_cookie = session_cookie
+        self._internal_token = internal_token
         self._timeout = timeout
 
     def _cookies(self) -> dict:
@@ -58,11 +62,24 @@ class CloudClient:
             return {}
         return {SESSION_COOKIE_NAME: self._session_cookie}
 
-    def _request(self, method: str, path: str, json_body: Optional[dict] = None) -> dict:
+    def _headers(self) -> dict:
+        if not self._internal_token:
+            return {}
+        return {"X-Internal-Service-Token": self._internal_token}
+
+    def _request(
+        self, method: str, path: str, json_body: Optional[dict] = None, params: Optional[dict] = None
+    ) -> dict:
         url = f"{self._base_url}{path}"
         try:
             response = httpx.request(
-                method, url, json=json_body, cookies=self._cookies(), timeout=self._timeout
+                method,
+                url,
+                json=json_body,
+                params=params,
+                cookies=self._cookies(),
+                headers=self._headers(),
+                timeout=self._timeout,
             )
         except httpx.HTTPError as e:
             raise CloudClientError(0, str(e)) from e
@@ -74,24 +91,95 @@ class CloudClient:
             raise CloudClientError(response.status_code, message)
         return response.json()
 
+    # ---- Device Cloud API (P05) - end-user session cookie auth ----
+
     def register_device(self, device: dict[str, Any]) -> dict:
         """POST /devices. Raises CloudClientError(status_code=409) on a duplicate
-        (user_id, device_name) - per P05's actual semantics, this is NOT idempotent. Callers
-        that want find-or-update behavior must catch 409 and use list_devices/update_device
-        themselves (see desktop/device_registration.py)."""
+        (user_id, device_name) - per P05's actual semantics, this is NOT idempotent."""
         return self._request("POST", "/devices", json_body=device)["device"]
 
     def list_devices(self) -> list[dict]:
-        """GET /devices - the authenticated user's own devices only."""
         return self._request("GET", "/devices")["devices"]
 
     def get_device(self, device_id: str) -> dict:
         return self._request("GET", f"/devices/{device_id}")["device"]
 
     def update_device(self, device_id: str, fields: dict[str, Any]) -> dict:
-        """POST /devices/{device_id} - partial update of mutable metadata/allocation fields."""
         return self._request("POST", f"/devices/{device_id}", json_body=fields)["device"]
 
     def heartbeat(self, device_id: str) -> dict:
-        """POST /devices/{device_id}/heartbeat."""
         return self._request("POST", f"/devices/{device_id}/heartbeat")["device"]
+
+    # ---- Session/auth API - internal-service auth ----
+
+    def create_session(self, user_info: dict[str, Any]) -> dict:
+        """POST /auth/sessions. Returns {session_id, user_info, subscription_info,
+        current_subscription_plan}."""
+        return self._request("POST", "/auth/sessions", json_body=user_info)
+
+    def validate_session(self, session_id: str) -> dict:
+        """POST /auth/sessions/validate. Returns {is_valid, user_info?, subscription_info?,
+        current_subscription_plan?} - never raises on an invalid session, check is_valid."""
+        return self._request("POST", "/auth/sessions/validate", json_body={"session_id": session_id})
+
+    def delete_session(self, session_id: str) -> None:
+        """POST /auth/sessions/delete."""
+        self._request("POST", "/auth/sessions/delete", json_body={"session_id": session_id})
+
+    def create_websocket_token(self, session_id: str) -> str:
+        """POST /auth/websocket-tokens. One-time, 60s-TTL token linking to the session, consumed
+        by socket-ssh."""
+        return self._request("POST", "/auth/websocket-tokens", json_body={"session_id": session_id})["token"]
+
+    # ---- Container/workspace metadata API - internal-service auth ----
+
+    def create_container(self, container: dict[str, Any]) -> dict:
+        """POST /containers. Raises CloudClientError(status_code=409) on a duplicate
+        (user_id, name)."""
+        return self._request("POST", "/containers", json_body=container)["container"]
+
+    def get_container(self, container_id: str, user_id: str) -> Optional[dict]:
+        try:
+            return self._request("GET", f"/containers/{container_id}", params={"user_id": user_id})["container"]
+        except CloudClientError as e:
+            if e.status_code == 404:
+                return None
+            raise
+
+    def list_containers(self, user_id: str, limit: Optional[int] = None, offset: Optional[int] = None) -> list[dict]:
+        params = {"user_id": user_id}
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        return self._request("GET", "/containers", params=params)["containers"]
+
+    def update_container(self, container_id: str, user_id: str, fields: dict[str, Any]) -> Optional[dict]:
+        try:
+            return self._request(
+                "POST", f"/containers/{container_id}", json_body={**fields, "user_id": user_id}
+            )["container"]
+        except CloudClientError as e:
+            if e.status_code == 404:
+                return None
+            raise
+
+    def delete_container(self, container_id: str, user_id: str) -> bool:
+        try:
+            self._request("POST", f"/containers/{container_id}/delete", json_body={"user_id": user_id})
+            return True
+        except CloudClientError as e:
+            if e.status_code == 404:
+                return False
+            raise
+
+    # ---- Catalog / subscription API - internal-service auth ----
+
+    def list_images(self) -> list[dict]:
+        return self._request("GET", "/catalog/images")["images"]
+
+    def list_subscription_types(self) -> list[dict]:
+        return self._request("GET", "/catalog/subscription-types")["subscription_types"]
+
+    def get_current_subscription(self, user_id: str) -> dict:
+        return self._request("GET", "/subscriptions/current", params={"user_id": user_id})["subscription_type"]

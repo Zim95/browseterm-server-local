@@ -14,7 +14,7 @@ from src.common.config import (
     SOCKET_SSH_WSS_URL
 )
 from src.authentication.authentication_helpers import authenticate_session
-from src.authentication.session_manager import session_manager
+from src.cloud_client.client import CloudClient
 from src.db_ops.image_db_ops import list_all_existing_images
 from src.db_ops.subscription_db_ops import list_all_existing_subscription_types
 from src.db_ops.container_db_ops import get_container
@@ -122,9 +122,9 @@ async def terminalpage(request: Request) -> HTMLResponse:
                 "error": f"Error loading terminal: {str(e)}"
             }
     
-    # Generate one-time WebSocket token for this session
+    # Generate one-time WebSocket token for this session (via Cloud - no direct Redis access)
     session_id = request.cookies.get('session')
-    ws_token = session_manager.create_websocket_token(session_id) if session_id else ''
+    ws_token = CloudClient().create_websocket_token(session_id) if session_id else ''
     return templates.TemplateResponse(
         "terminalpage.html",
         {

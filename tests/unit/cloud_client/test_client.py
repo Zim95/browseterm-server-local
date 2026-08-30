@@ -91,5 +91,63 @@ class TestCloudClientBoundary(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 0)
 
 
+class TestCloudClientSessionContainerCatalog(unittest.TestCase):
+    """New session/container/catalog/subscription methods - internal-service auth."""
+
+    @patch("src.cloud_client.client.httpx.request")
+    def test_create_session_sends_internal_token(self, mock_request):
+        mock_request.return_value = _mock_response(201, {"session_id": "s1", "user_info": {}})
+        client = CloudClient(base_url="http://cloud.test", internal_token="secret")
+        client.create_session({"provider_id": "p1", "provider": "google"})
+        self.assertEqual(mock_request.call_args.kwargs["headers"], {"X-Internal-Service-Token": "secret"})
+
+    @patch("src.cloud_client.client.httpx.request")
+    def test_no_internal_token_sends_no_header(self, mock_request):
+        mock_request.return_value = _mock_response(200, {"is_valid": False})
+        client = CloudClient(base_url="http://cloud.test")
+        client.validate_session("s1")
+        self.assertEqual(mock_request.call_args.kwargs["headers"], {})
+
+    @patch("src.cloud_client.client.httpx.request")
+    def test_get_container_404_returns_none_not_raise(self, mock_request):
+        mock_request.return_value = _mock_response(404, {"error": "Container not found"})
+        client = CloudClient(base_url="http://cloud.test", internal_token="secret")
+        self.assertIsNone(client.get_container("c1", "u1"))
+
+    @patch("src.cloud_client.client.httpx.request")
+    def test_get_container_other_error_raises(self, mock_request):
+        mock_request.return_value = _mock_response(500, {"error": "boom"})
+        client = CloudClient(base_url="http://cloud.test", internal_token="secret")
+        with self.assertRaises(CloudClientError):
+            client.get_container("c1", "u1")
+
+    @patch("src.cloud_client.client.httpx.request")
+    def test_update_container_sends_user_id_alongside_fields(self, mock_request):
+        mock_request.return_value = _mock_response(200, {"container": {"id": "c1", "status": "Running"}})
+        client = CloudClient(base_url="http://cloud.test", internal_token="secret")
+        client.update_container("c1", "u1", {"status": "Running"})
+        self.assertEqual(mock_request.call_args.kwargs["json"], {"status": "Running", "user_id": "u1"})
+
+    @patch("src.cloud_client.client.httpx.request")
+    def test_delete_container_404_returns_false(self, mock_request):
+        mock_request.return_value = _mock_response(404, {"error": "Container not found"})
+        client = CloudClient(base_url="http://cloud.test", internal_token="secret")
+        self.assertFalse(client.delete_container("c1", "u1"))
+
+    @patch("src.cloud_client.client.httpx.request")
+    def test_list_containers_passes_pagination_params(self, mock_request):
+        mock_request.return_value = _mock_response(200, {"containers": []})
+        client = CloudClient(base_url="http://cloud.test", internal_token="secret")
+        client.list_containers("u1", limit=5, offset=10)
+        self.assertEqual(mock_request.call_args.kwargs["params"], {"user_id": "u1", "limit": 5, "offset": 10})
+
+    @patch("src.cloud_client.client.httpx.request")
+    def test_get_current_subscription(self, mock_request):
+        mock_request.return_value = _mock_response(200, {"subscription_type": {"type": "free"}})
+        client = CloudClient(base_url="http://cloud.test", internal_token="secret")
+        result = client.get_current_subscription("u1")
+        self.assertEqual(result, {"type": "free"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -99,30 +99,26 @@ class TestCreateContainerInK8sOwnership(TestCase):
         }
 
     def test_container_not_owned_by_caller_is_rejected_before_k8s_call(self) -> None:
-        mock_ops = MagicMock()
-        mock_ops.find_one.return_value = SimpleNamespace(data=None)  # scoped lookup finds nothing
         mock_service = MagicMock()
         mock_service.create_container_in_k8s = AsyncMock()
         request = _mock_request(body=self._body(), user_id=USER_A)
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops), \
+        with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=None)) as mock_get, \
              patch('src.api_handlers.ContainerService', return_value=mock_service):
             result = asyncio.run(api_handlers.create_container_in_k8s.__wrapped__(request=request))
         self.assertEqual(result.status_code, 404)
         mock_service.create_container_in_k8s.assert_not_called()
         # ownership lookup was scoped to the caller, not the spoofed body value
-        find_filters = mock_ops.find_one.call_args.kwargs['filters']
-        self.assertEqual(find_filters, {'id': 'container-1', 'user_id': USER_A})
+        mock_get.assert_called_once_with('container-1', USER_A)
 
     def test_network_name_is_derived_from_session_not_client_body(self) -> None:
-        mock_ops = MagicMock()
-        mock_ops.find_one.return_value = SimpleNamespace(data={'id': 'container-1', 'user_id': USER_A})
         mock_service = MagicMock()
         mock_service.create_container_in_k8s = AsyncMock(return_value=ContainerResponseModel(
             container_name='my-container', container_id='pod-uid', container_ip='10.0.0.1',
             container_network=f'{USER_A}-namespace', container_ports=[], associated_resources=[],
         ))
         request = _mock_request(body=self._body(), user_id=USER_A)
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops), \
+        with patch('src.api_handlers.get_container_by_id',
+                   AsyncMock(return_value={'id': 'container-1', 'user_id': USER_A})), \
              patch('src.api_handlers.ContainerService', return_value=mock_service):
             result = asyncio.run(api_handlers.create_container_in_k8s.__wrapped__(request=request))
         self.assertEqual(result.status_code, 200)
@@ -223,39 +219,36 @@ class TestSaveContainerOwnership(TestCase):
     container-maker, and must never trust a client-supplied network_name.'''
 
     def test_container_not_owned_by_caller_is_rejected_before_any_mutation(self) -> None:
-        mock_ops = MagicMock()
-        mock_ops.find_one.return_value = SimpleNamespace(data=None)  # not User A's container
         mock_service = MagicMock()
         mock_service.save_container_in_k8s = AsyncMock()
         request = _mock_request(
             body={'container_id': 'container-1', 'network_name': f'{USER_B}-namespace'},
             user_id=USER_A,
         )
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops), \
+        with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=None)) as mock_get, \
+             patch('src.api_handlers.update_container_fields', AsyncMock()) as mock_update, \
              patch('src.api_handlers.ContainerService', return_value=mock_service):
             result = asyncio.run(api_handlers.save_container.__wrapped__(request=request))
         self.assertEqual(result.status_code, 404)
-        # save_status was never touched -- the only ops call is the ownership lookup itself
-        mock_ops.update.assert_not_called()
-        find_filters = mock_ops.find_one.call_args.kwargs['filters']
-        self.assertEqual(find_filters, {'id': 'container-1', 'user_id': USER_A})
+        # save_status was never touched -- the only lookup is the ownership check itself
+        mock_update.assert_not_called()
+        mock_get.assert_called_once_with('container-1', USER_A)
 
     def test_owned_container_save_uses_session_derived_network_name(self) -> None:
-        mock_ops = MagicMock()
-        mock_ops.find_one.return_value = SimpleNamespace(data={'id': 'container-1', 'user_id': USER_A})
-        mock_ops.update.return_value = SimpleNamespace(data=None)
         mock_service = MagicMock()
         mock_service.save_container_in_k8s = AsyncMock(return_value=MagicMock())
         request = _mock_request(
             body={'container_id': 'container-1', 'network_name': f'{USER_B}-namespace'},
             user_id=USER_A,
         )
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops), \
+        with patch('src.api_handlers.get_container_by_id',
+                   AsyncMock(return_value={'id': 'container-1', 'user_id': USER_A})), \
+             patch('src.api_handlers.update_container_fields', AsyncMock()) as mock_update, \
              patch('src.api_handlers.ContainerService', return_value=mock_service):
             result = asyncio.run(api_handlers.save_container.__wrapped__(request=request))
         self.assertEqual(result.status_code, 202)
-        pending = [c.kwargs['data'] for c in mock_ops.update.call_args_list
-                   if c.kwargs.get('data', {}).get('save_status') == SaveStatus.PENDING.value]
+        pending = [c.args[2] for c in mock_update.call_args_list
+                   if c.args[2].get('save_status') == SaveStatus.PENDING.value]
         self.assertTrue(pending, 'save_container did not mark save_status=PENDING for the owned container')
 
 
@@ -273,40 +266,35 @@ class TestResumeContainerOwnership(TestCase):
         }
 
     def test_caller_cannot_resume_another_users_container(self) -> None:
-        mock_ops = MagicMock()
         # scoped lookup: User A's session filters by user_id=USER_A, so User B's row is never
-        # returned by a correctly-scoped find_one -- simulate that DB behavior directly.
-        mock_ops.find_one.return_value = SimpleNamespace(data=None)
+        # returned by a correctly-scoped get_container_by_id -- simulate that behavior directly.
         mock_service = MagicMock()
         mock_service.create_container_in_k8s = AsyncMock()
         request = _mock_request(body={'container_id': self.container_id}, user_id=USER_A)
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops), \
+        with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=None)) as mock_get, \
              patch('src.api_handlers.ContainerService', return_value=mock_service):
             result = asyncio.run(api_handlers.resume_container.__wrapped__(request=request))
         self.assertEqual(result.status_code, 404)
         mock_service.create_container_in_k8s.assert_not_called()
-        find_filters = mock_ops.find_one.call_args.kwargs['filters']
-        self.assertEqual(find_filters, {'id': self.container_id, 'user_id': USER_A})
+        mock_get.assert_called_once_with(self.container_id, USER_A)
 
     def test_caller_can_resume_own_container(self) -> None:
         row = dict(self.row_owned_by_b, user_id=USER_A)
-        mock_ops = MagicMock()
-        mock_ops.find_one.return_value = SimpleNamespace(data=row)
-        mock_ops.update.return_value = SimpleNamespace(data=None)
         mock_service = MagicMock()
         mock_service.create_container_in_k8s = AsyncMock(return_value=ContainerResponseModel(
             container_name='b-container', container_id='new-pod-uid', container_ip='10.0.0.9',
             container_network=f'{USER_A}-namespace', container_ports=[], associated_resources=[],
         ))
         request = _mock_request(body={'container_id': self.container_id}, user_id=USER_A)
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops), \
+        with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=row)), \
+             patch('src.api_handlers.update_container_fields', AsyncMock()), \
+             patch('src.api_handlers.list_user_containers_db', AsyncMock(return_value=[])), \
              patch('src.api_handlers.ContainerService', return_value=mock_service), \
              patch('src.api_handlers.get_user_current_subscription_plan', AsyncMock(return_value={
                  'name': 'Free', 'max_containers': 5,
                  'cpu_limit_per_container': '1', 'memory_limit_per_container': '1Gi',
                  'storage_limit_per_container': '2Gi',
              })):
-            mock_ops.find.return_value = SimpleNamespace(success=True, data=[])
             result = asyncio.run(api_handlers.resume_container.__wrapped__(request=request))
         self.assertEqual(result.status_code, 200)
         mock_service.create_container_in_k8s.assert_called_once()
@@ -317,14 +305,12 @@ class TestContainerActivityCrossUser(TestCase):
     verified end-to-end here per the P03 cross-user test requirement).'''
 
     def test_activity_scoped_to_caller_never_touches_another_users_row(self) -> None:
-        mock_ops = MagicMock()
-        mock_ops.update.return_value = SimpleNamespace(data=None)
         request = _mock_request(body={'container_id': 'b-container'}, user_id=USER_A)
-        with patch('src.api_handlers.ContainerOps', return_value=mock_ops):
+        with patch('src.api_handlers.update_container_fields', AsyncMock()) as mock_update:
             result = asyncio.run(api_handlers.container_activity.__wrapped__(request=request))
         self.assertEqual(result.status_code, 200)
-        filters = mock_ops.update.call_args.kwargs['filters']
-        self.assertEqual(filters, {'id': 'b-container', 'user_id': USER_A})
+        called_container_id, called_user_id, _fields = mock_update.call_args.args
+        self.assertEqual((called_container_id, called_user_id), ('b-container', USER_A))
 
 
 class TestContainerStatusSseOwnership(TestCase):

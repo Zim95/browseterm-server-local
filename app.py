@@ -50,8 +50,9 @@ app.mount("/static", RevalidateStaticFiles(directory="templates/static"), name="
 # health checkup
 app.add_api_route(path="/echo", endpoint=api_handlers.echo, methods=["POST"])
 
-# payment apis
-app.add_api_route(path="/create-payment", endpoint=api_handlers.create_payment, methods=["POST"])
+# payment apis - disabled per explicit direction (payments not offered for now); code kept
+# in place (not deleted) so re-enabling later is a one-line uncomment.
+# app.add_api_route(path="/create-payment", endpoint=api_handlers.create_payment, methods=["POST"])
 
 # application templates
 app.add_api_route(path="/", endpoint=template_handlers.home, methods=["GET"])

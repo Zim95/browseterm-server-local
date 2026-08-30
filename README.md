@@ -1,10 +1,11 @@
 # browseterm-server-local
 
 **Local control plane.** Serves the existing Browseterm browser UI and talks to local
-ContainerMaker/Socket-SSH/Kubernetes. Must never hold Cloud PostgreSQL/Redis credentials for
-central state - see "Trust boundary" below for what that actually means today vs. the target
-end-state. Runs inside a separate Local k3s cluster (`browseterm-k3s-local`) from Cloud's
-(`browseterm-k3s`) - see plan section 2 and `browseterm-monorepo` for cluster bootstrap.
+ContainerMaker/Socket-SSH/Kubernetes. Holds **no PostgreSQL/Redis client at all** - every read
+or write of central state (sessions, users, containers, images, subscriptions) goes through
+Cloud's HTTP API via `src/cloud_client/`. Runs inside a separate Local k3s cluster
+(`browseterm-k3s-local`) from Cloud's (`browseterm-k3s`) - see plan section 2 and
+`browseterm-monorepo` for cluster bootstrap.
 
 The Mac Desktop Resource MVP (auth + device registration + resource allocation) lives in its own
 repository, [`browseterm-desktop`](https://github.com/Zim95/browseterm-desktop) - it was
@@ -28,24 +29,39 @@ corrected that into two physically separate repositories:
 
 ## Trust boundary
 
-The target architecture (plan section 2.2): Local never holds Cloud PostgreSQL/Redis
-credentials; all central-state access happens through authenticated Cloud HTTPS APIs.
+The target architecture (plan section 2.2) is now the *actual* architecture: Local never holds
+Cloud PostgreSQL/Redis credentials; all central-state access happens through Cloud's HTTP API.
+Every former direct-DB path has been migrated:
 
-**Today, this repo is not fully there yet - and that's intentional, documented debt, not an
-oversight.** Everything this repo inherited from the old combined `app.py` (OAuth login,
-container/workspace CRUD, SSE, payments) still talks to Postgres/Redis directly, because their
-Cloud-API replacements are explicitly later tasks:
-
-| Legacy direct-DB path | Removed by |
+| Former legacy direct-DB path | Now calls |
 |---|---|
-| `src/authentication/session_manager.py`/`authentication_helpers.py` (session issuance/validation), transitively `db_ops/user_db_ops.py`/`subscription_db_ops.py` | P07 (Cloud OAuth/session migration) |
-| `src/status_listener.py` (Postgres LISTEN/NOTIFY -> SSE) | P10 (Cloud SSE) |
-| `src/api_handlers.py`, `src/db_ops/container_db_ops.py`, `src/db_ops/image_db_ops.py` (container/workspace CRUD) | P12/P13 (Cloud workspace metadata/create APIs, Local create path) |
+| `src/authentication/authentication_helpers.py` (session issuance/validation) | `CloudClient.create_session`/`validate_session`/`delete_session` -> Cloud `POST /auth/sessions*` |
+| `src/template_handlers.py`'s one-time WebSocket token | `CloudClient.create_websocket_token` -> Cloud `POST /auth/websocket-tokens` |
+| `src/status_listener.py` (was Postgres LISTEN/NOTIFY) | polls `CloudClient.list_containers` on an interval and diffs against the last-seen snapshot per user (see that module's docstring - real push-based delivery is P10's job, this is a documented interim simplification) |
+| `src/db_ops/container_db_ops.py`, `image_db_ops.py`, `subscription_db_ops.py` (container/image/subscription CRUD) | `CloudClient.create_container`/`get_container`/`list_containers`/`update_container`/`delete_container`/`list_images`/`list_subscription_types`/`get_current_subscription` |
 
-**This one new P06 code path is exempt from this by construction**: `src/cloud_client/` never
-imports `browseterm_db`, `src.common.config.DB_CONFIG`, or any `POSTGRES_*`/`REDIS_*` setting -
-it talks to Cloud exclusively over HTTPS. Do not add a DB/Redis import to it; if a future task
-needs one, that's a sign it belongs back in the legacy tree above, not here.
+`session_manager.py` and `db_ops/user_db_ops.py` were deleted outright (their only caller,
+session issuance, moved entirely into Cloud's `process_user_info`).
+
+Payments (`/create-payment`) are disabled - the route registration in `app.py` is commented out,
+not deleted, so re-enabling is a one-line change. `PaymentService`/`payment-gateway` itself
+never touched Postgres/Redis directly, so it needed no migration.
+
+**No file in this repo imports `browseterm_db.common.config`, `DB_CONFIG`, or any
+`POSTGRES_*`/`REDIS_*` setting for an active connection** - verified by grep as part of this
+migration (a couple of harmless leftovers remain: `src/common/config.py` still *declares*
+`DB_CONFIG`/`POSTGRES_*`/`REDIS_*` as inert, never-imported values, matching the same pattern
+already established for Cloud's local-only settings; `browseterm_db` itself stays a dependency
+purely for shared enum/type imports like `SaveStatus`/`ContainerStatus`/`AuthProvider`, never a
+DB client). Do not add a DB/Redis client import anywhere in this repo; if a future task seems to
+need one, that's a sign the corresponding Cloud API is missing, not that this boundary should be
+broken.
+
+Interim auth caveat (unchanged, still real): `POST /auth/sessions` etc. are gated by a shared
+`CLOUD_INTERNAL_API_TOKEN` secret rather than a real per-request credential, because Local
+constructs the session-creation request itself after its own OAuth token exchange - there's no
+cookie for Cloud to check yet at that point. The actual fix (Cloud becomes the OAuth client
+entirely, plan section 7.1 / P07) removes the need for this trust-by-shared-secret model.
 
 ## `src/cloud_client/` - the Local -> Cloud boundary
 
@@ -53,11 +69,16 @@ needs one, that's a sign it belongs back in the legacy tree above, not here.
 Local Handler -> CloudClient -> HTTPS -> Cloud browseterm-server (browseterm.cloud.com)
 ```
 
-The only intended way this repo's code reaches central Cloud state. Currently wraps just the
-P05 Device Cloud API (register/list/get/update/heartbeat) - do not add unrelated Cloud endpoints
-here without a corresponding Cloud API existing first. `browseterm-desktop` has its own,
-deliberately duplicated copy of this same package for the identical reason - see that repo's
-README.
+The only intended way this repo's code reaches central Cloud state. Wraps the P05 Device Cloud
+API (register/list/get/update/heartbeat, end-user session-cookie auth) and the session/
+container/catalog/subscription API this repo's own handlers use (internal-service-token auth -
+see "Trust boundary" above) - do not add unrelated Cloud endpoints here without a corresponding
+Cloud API existing first. `browseterm-desktop` has its own, deliberately duplicated copy of the
+Device-API half of this package for the identical reason - see that repo's README.
+
+`CLOUD_INTERNAL_API_TOKEN` must match the same env var on Cloud; unset (empty string default),
+`CloudClient` sends no `X-Internal-Service-Token` header at all, so the server-to-server routes
+correctly reject it as unauthorized rather than silently proceeding.
 
 Default `BROWSETERM_CLOUD_API_URL` is `http://browseterm.cloud.com:9999` (Cloud's DNS
 convention, mirroring `browseterm.local.com` for Local); override for local development against

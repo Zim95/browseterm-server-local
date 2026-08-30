@@ -12,7 +12,6 @@ from typing import AsyncGenerator
 
 from src.containers.containers_service import ContainerService
 from src.data_models.containers import CreateContainerDBRequest, CreateContainerK8SRequest, GetContainerRequest, ResourceLimits, UpdateContainerRequest, UpdateContainerFilters, UpdateContainerData, ListUserContainersRequest, DeleteContainerDBRequest, DeleteContainerK8SRequest, SaveContainerK8SRequest
-from browseterm_db.operations.all_operations import ContainerOps
 from browseterm_db.models.containers import SaveStatus, ContainerStatus
 from src.data_models.echo import EchoRequestData, EchoResponseData
 from src.data_models.payments import CreatePaymentRequest
@@ -20,8 +19,8 @@ from src.payments.payments_service import PaymentService
 from src.common.exceptions import PaymentGatewayException, PaymentGatewayUnavailableException
 from src.authentication.authentication_helpers import authenticate_session
 from src.authentication.authentication_service import GoogleAuthenticationService, GithubAuthenticationService
-from src.common.config import DB_CONFIG, NAMESPACE
 from src.common.logging_setup import get_logger, request_id_var
+from src.db_ops.container_db_ops import get_container_by_id, list_user_containers as list_user_containers_db, update_container_fields
 from src.db_ops.subscription_db_ops import get_user_current_subscription_plan
 from src.db_ops.dto.subscription_dto import GetUserSubscriptionPlanModel
 from kubernetes.utils.quantity import parse_quantity
@@ -182,9 +181,8 @@ async def create_container_in_k8s(request: Request) -> JSONResponse:
         # row's status, so creating a pod for a container_id the caller doesn't own would let
         # them hijack another user's container row. Scoped lookup avoids leaking whether the id
         # exists at all if it isn't the caller's.
-        ops = ContainerOps(DB_CONFIG)
-        owned_row = await asyncio.to_thread(ops.find_one, filters={"id": container_id, "user_id": user_id})
-        if not owned_row.data:
+        owned_row = await get_container_by_id(container_id, user_id)
+        if not owned_row:
             return JSONResponse(content={'error': f'Container {container_id} not found'}, status_code=404)
 
         # Build resource limits
@@ -369,29 +367,25 @@ async def delete_container_in_k8s(request: Request) -> JSONResponse:
         return JSONResponse(content={'error': f"Error deleting container from Kubernetes: {str(e)}"}, status_code=500)
 
 
-async def _set_save_status(container_id: str, save_status: str, save_error: str = None, stamp_attempt: bool = False) -> None:
-    """Update a container's save_status/save_error in the DB. The save-status trigger fires the SSE.
-    stamp_attempt=True records last_save_attempted_at (when this attempt started) -- set only from
-    save_container, at the single moment a save is actually initiated (Pending)."""
-    ops = ContainerOps(DB_CONFIG)
+async def _set_save_status(container_id: str, user_id: str, save_status: str, save_error: str = None, stamp_attempt: bool = False) -> None:
+    """Update a container's save_status/save_error via Cloud's container API. The save-status
+    trigger fires the SSE. stamp_attempt=True records last_save_attempted_at (when this attempt
+    started) -- set only from save_container, at the single moment a save is actually initiated
+    (Pending)."""
     data = {"save_status": save_status, "save_error": save_error, "last_request_id": request_id_var.get()}
     if stamp_attempt:
         data["last_save_attempted_at"] = datetime.now(timezone.utc)
-    await asyncio.to_thread(
-        ops.update,
-        filters={"id": container_id},
-        data=data,
-    )
+    await update_container_fields(container_id, user_id, data)
 
 
-async def _run_save(container_service, save_request, container_id: str) -> None:
+async def _run_save(container_service, save_request, container_id: str, user_id: str) -> None:
     """Background task: run the (blocking) gRPC save. The Job records SUCCEEDED/FAILED via the DB;
     if the gRPC call itself fails before the Job records anything, mark FAILED here."""
     try:
         await container_service.save_container_in_k8s(save_request)
     except Exception as e:
         try:
-            await _set_save_status(container_id, SaveStatus.FAILED.value, save_error=str(e)[:1000])
+            await _set_save_status(container_id, user_id, SaveStatus.FAILED.value, save_error=str(e)[:1000])
         except Exception as db_e:
             logger.error("failed to record save failure", extra={"container_id": container_id}, exc_info=True)
 
@@ -408,18 +402,18 @@ async def save_container(request: Request) -> JSONResponse:
         container_id = request_data['container_id']   # DB container id
         user_id = request.state.user_info['id']
 
-        # Ownership check BEFORE any side effect: _set_save_status below mutates the row by id
-        # alone, and container-maker performs a real snapshot Job, so an unscoped lookup would
-        # let any authenticated user trigger/corrupt another user's save. Scoped lookup avoids
+        # Ownership check BEFORE any side effect: Cloud's container API update is itself always
+        # ownership-scoped ({id, user_id} together, see container_db_ops.update_container_fields),
+        # but container-maker performs a real snapshot Job, so an unscoped lookup would still let
+        # any authenticated user trigger another user's save side effect. Scoped lookup avoids
         # leaking whether the id exists at all if it isn't the caller's.
-        ops = ContainerOps(DB_CONFIG)
-        owned_row = await asyncio.to_thread(ops.find_one, filters={"id": container_id, "user_id": user_id})
-        if not owned_row.data:
+        owned_row = await get_container_by_id(container_id, user_id)
+        if not owned_row:
             return JSONResponse(content={'error': f'Container {container_id} not found'}, status_code=404)
 
         # Mark PENDING now so the frontend can show the spinner immediately, and stamp
         # last_save_attempted_at -- this is the one place a save is actually initiated.
-        await _set_save_status(container_id, SaveStatus.PENDING.value, stamp_attempt=True)
+        await _set_save_status(container_id, user_id, SaveStatus.PENDING.value, stamp_attempt=True)
 
         # network_name is always derived from the authenticated (and now ownership-verified)
         # user, never the client body -- see create/delete-container-in-k8s for why.
@@ -427,7 +421,7 @@ async def save_container(request: Request) -> JSONResponse:
         container_service = ContainerService()
 
         # container-maker blocks until the snapshot Job completes, so run it in the background.
-        asyncio.create_task(_run_save(container_service, save_request, container_id))
+        asyncio.create_task(_run_save(container_service, save_request, container_id, user_id))
 
         return JSONResponse(content={'status': 'pending', 'container_id': container_id}, status_code=202)
     except HTTPException as e:
@@ -443,13 +437,10 @@ async def save_container(request: Request) -> JSONResponse:
 _ACTIVE_CONTAINER_STATUSES = {ContainerStatus.PENDING.value, ContainerStatus.RUNNING.value, ContainerStatus.RESUMING.value}
 
 
-async def _count_active_containers(ops: ContainerOps, user_id: str, exclude_container_id: str) -> int:
+async def _count_active_containers(user_id: str, exclude_container_id: str) -> int:
     '''Count this user's containers that currently have (or are about to have) a live pod,
     excluding exclude_container_id itself -- the one about to be resumed, which is not active yet.'''
-    result = await asyncio.to_thread(ops.find, filters={"user_id": user_id})
-    if not result.success:
-        raise Exception(result.error)
-    rows = result.data or []
+    rows = await list_user_containers_db(user_id) or []
     return sum(
         1 for r in rows
         if r["id"] != exclude_container_id
@@ -500,6 +491,7 @@ async def resume_container(request: Request) -> JSONResponse:
     through too.
     '''
     container_id = None
+    user_id = None
     try:
         request_data: dict = await request.json()
         container_id = request_data['container_id']
@@ -513,9 +505,7 @@ async def resume_container(request: Request) -> JSONResponse:
         # keeps every subsequent row['user_id'] reference (subscription/plan checks, network_name,
         # environment, DB updates) tied to the caller who actually owns this container.
         user_id = request.state.user_info['id']
-        ops = ContainerOps(DB_CONFIG)
-        row_result = await asyncio.to_thread(ops.find_one, filters={"id": container_id, "user_id": user_id})
-        row: dict = row_result.data
+        row: dict = await get_container_by_id(container_id, user_id)
         if not row:
             logger.warning("resume: container not found", extra={"container_id": container_id})
             return JSONResponse(content={'error': f'Container {container_id} not found'}, status_code=404)
@@ -524,7 +514,7 @@ async def resume_container(request: Request) -> JSONResponse:
             subscription_type = await get_user_current_subscription_plan(
                 GetUserSubscriptionPlanModel(user_id=row['user_id'])
             )
-            active_count = await _count_active_containers(ops, row['user_id'], container_id)
+            active_count = await _count_active_containers(row['user_id'], container_id)
             if active_count >= subscription_type['max_containers']:
                 logger.info(
                     "resume blocked: over plan's container limit",
@@ -557,7 +547,9 @@ async def resume_container(request: Request) -> JSONResponse:
             logger.error("entitlement check failed, allowing resume", extra={"container_id": container_id}, exc_info=True)
 
         # mark RESUMING so the UI can show progress
-        await asyncio.to_thread(ops.update, filters={"id": container_id}, data={"status": ContainerStatus.RESUMING, "last_request_id": request_id_var.get()})
+        await update_container_fields(
+            container_id, user_id, {"status": ContainerStatus.RESUMING, "last_request_id": request_id_var.get()}
+        )
 
         # No DB credentials in the user pod (same as create): status is written by the central
         # status_monitor, not an in-pod sidecar. CONTAINER_ID rides only so container-maker can stamp
@@ -590,10 +582,10 @@ async def resume_container(request: Request) -> JSONResponse:
         # central status_monitor keeps the status accurate thereafter). ip_address MUST be updated
         # here: resume creates a brand-new Service with a new ClusterIP, and the monitor only touches
         # status — without this the terminal keeps dialing the old (deleted) IP and SSH times out.
-        await asyncio.to_thread(
-            ops.update,
-            filters={"id": container_id},
-            data={
+        await update_container_fields(
+            container_id,
+            user_id,
+            {
                 "kubernetes_id": response.container_id,
                 "ip_address": response.container_ip,
                 "associated_resources": response.associated_resources,
@@ -610,12 +602,9 @@ async def resume_container(request: Request) -> JSONResponse:
         return JSONResponse(content={'error': e.detail}, status_code=e.status_code)
     except Exception as e:
         logger.error("resume failed", extra={"container_id": container_id}, exc_info=True)
-        if container_id:
+        if container_id and user_id:
             try:
-                await asyncio.to_thread(
-                    ContainerOps(DB_CONFIG).update,
-                    filters={"id": container_id}, data={"status": ContainerStatus.FAILED},
-                )
+                await update_container_fields(container_id, user_id, {"status": ContainerStatus.FAILED})
             except Exception:
                 pass
         return JSONResponse(content={'error': f"Error resuming container: {str(e)}"}, status_code=500)
@@ -638,12 +627,7 @@ async def container_activity(request: Request) -> JSONResponse:
             return JSONResponse(content={'error': 'container_id is required'}, status_code=400)
         user_info = request.state.user_info
         user_id = user_info.id if hasattr(user_info, 'id') else user_info['id']
-        ops = ContainerOps(DB_CONFIG)
-        await asyncio.to_thread(
-            ops.update,
-            filters={"id": container_id, "user_id": user_id},
-            data={"last_active_at": datetime.now(timezone.utc)},
-        )
+        await update_container_fields(container_id, user_id, {"last_active_at": datetime.now(timezone.utc)})
         return JSONResponse(content={'status': 'ok'}, status_code=200)
     except Exception as e:
         return JSONResponse(content={'error': f"Error recording activity: {str(e)}"}, status_code=500)
