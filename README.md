@@ -47,6 +47,20 @@ Payments (`/create-payment`) are disabled - the route registration in `app.py` i
 not deleted, so re-enabling is a one-line change. `PaymentService`/`payment-gateway` itself
 never touched Postgres/Redis directly, so it needed no migration.
 
+## P13 - workspace creation, device_id, and partial-failure cleanup
+
+Workspace creation is two separate authenticated requests (`POST /create-container-in-db` then
+`POST /create-container-in-k8s`, both in `src/api_handlers.py`), called sequentially by the
+browser. This repo's create-container request to Cloud (`CloudClient.create_container`) does not
+send `device_id` at all - Local has no established way to learn "its own" device_id (that's a
+`browseterm-desktop` concept, a separate process with no IPC channel to this one); Cloud resolves
+the caller's currently-active device automatically instead (see `browseterm-server`'s README's P13
+section). If `create_container_in_k8s`'s real ContainerMaker/K8s call fails, the handler now
+best-effort releases the DB row and its Cloud-side resource reservation (via the same
+`ContainerService.delete_container_in_db` path the real delete flow uses) before returning the
+error - previously that row and reservation leaked forever, and the container's name would
+permanently block any retry under the same name. See `~/browseterm/p.md`'s P13 section.
+
 **No file in this repo imports `browseterm_db.common.config`, `DB_CONFIG`, or any
 `POSTGRES_*`/`REDIS_*` setting for an active connection** - verified by grep as part of this
 migration (a couple of harmless leftovers remain: `src/common/config.py` still *declares*
@@ -190,15 +204,38 @@ and ingress-nginx's own `svclb` will sit `Pending` forever otherwise:
     SOCKET_SSH_WSS_URL=ws://socketssh.local:8000
     INGRESS_HOST=browseterm.local.com
     SOCKET_SSH_HOST=socket-ssh.local.com
+
+    # P13 - if browseterm-k3s (Cloud) and browseterm-k3s-local (this repo) are two separate k3d
+    # clusters on the SAME Mac (this project's actual dev convention - see above), a pod here
+    # resolving BROWSETERM_CLOUD_API_URL's hostname does NOT see the host-only /etc/hosts entry
+    # pointing it at 127.0.0.1 - it needs a hostAliases override pointing at the host machine
+    # instead (see infra/deployment/deployment.yaml's P13 comment for the full why). Determine the
+    # IP with: `kubectl --context k3d-browseterm-k3s-local -n <namespace> run tmp --rm -it
+    # --image=busybox --restart=Never -- nslookup host.docker.internal` (or exec into any already-
+    # running pod in that cluster and run the same). Not needed at all on a single-cluster setup
+    # (docker-desktop context, or Cloud and Local sharing one cluster).
+    CLOUD_INGRESS_HOST=browseterm.cloud.com
+    CLOUD_INGRESS_HOST_IP=192.168.65.254
     ```
 
-5. Run the development build script, if not already done.
+5. Create the `browseterm-internal-api-token` Secret in this cluster - not created by either
+    setup script (same pattern as `browseterm-db-credentials`). Must hold the exact same value as
+    Cloud's own `CLOUD_INTERNAL_API_TOKEN` (see `browseterm-server/infra/cloud/cloud.yaml`) - every
+    internal-token-gated call this repo makes to Cloud (session validate/delete, container CRUD,
+    catalog, sse-tokens) 401s otherwise:
+    ```
+    kubectl create secret generic browseterm-internal-api-token \
+      --from-literal=CLOUD_INTERNAL_API_TOKEN=<same value as Cloud's> \
+      -n <your-namespace>
+    ```
+
+6. Run the development build script, if not already done.
     ```
     make dev_build
     ```
     This will build the docker image required for k8s development.
 
-6. Run the development setup script.
+7. Run the development setup script.
     ```
     make dev_setup
     ```

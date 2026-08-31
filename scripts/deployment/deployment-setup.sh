@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Check if enough arguments are provided
-if [ $# -lt 20 ]; then
-    echo "Usage: $0 <namespace> <repo-name> <container-maker-host> <container-maker-port> <container-maker-certs-secret-name> <cert-manager-cron-job-name> <browseterm-cloud-api-url> <postgres-host> <postgres-port> <postgres-user> <postgres-password> <postgres-db> <socket-ssh-host> <socket-ssh-wss-url> <ingress-host> <cookie-secure> <cookie-samesite> <payment-gateway-host> <payment-gateway-port> <payment-gateway-certs-secret-name>"
+if [ $# -lt 22 ]; then
+    echo "Usage: $0 <namespace> <repo-name> <container-maker-host> <container-maker-port> <container-maker-certs-secret-name> <cert-manager-cron-job-name> <browseterm-cloud-api-url> <postgres-host> <postgres-port> <postgres-user> <postgres-password> <postgres-db> <socket-ssh-host> <socket-ssh-wss-url> <ingress-host> <cookie-secure> <cookie-samesite> <payment-gateway-host> <payment-gateway-port> <payment-gateway-certs-secret-name> <cloud-ingress-host> <cloud-ingress-host-ip>"
     exit 1
 fi
 
@@ -29,6 +29,11 @@ COOKIE_SAMESITE=${17}
 PAYMENT_GATEWAY_HOST=${18}
 PAYMENT_GATEWAY_PORT=${19}
 PAYMENT_GATEWAY_CERTS_SECRET_NAME=${20}
+# P13 - see the note in infra/deployment/deployment.yaml: the hostname/IP the local dev
+# two-k3d-cluster topology needs a hostAliases override for, so Local's own pod can actually
+# reach Cloud instead of resolving back to itself. See SETUP-LOCAL.md.
+CLOUD_INGRESS_HOST=${21}
+CLOUD_INGRESS_HOST_IP=${22}
 
 export NAMESPACE=$NAMESPACE
 export REPO_NAME=$REPO_NAME
@@ -50,4 +55,6 @@ export SOCKET_SSH_WSS_URL=$SOCKET_SSH_WSS_URL
 export INGRESS_HOST=$INGRESS_HOST
 export COOKIE_SECURE=$COOKIE_SECURE
 export COOKIE_SAMESITE=$COOKIE_SAMESITE
+export CLOUD_INGRESS_HOST=$CLOUD_INGRESS_HOST
+export CLOUD_INGRESS_HOST_IP=$CLOUD_INGRESS_HOST_IP
 envsubst < $YAML | kubectl apply -f -

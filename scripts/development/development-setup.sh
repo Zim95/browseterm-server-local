@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Check if enough arguments are provided
-if [ $# -lt 19 ]; then
-    echo "Usage: $0 <namespace> <absolute-path-to-current-working-directory> <repo-name> <container-maker-host> <container-maker-port> <container-maker-certs-secret-name> <cert-manager-cron-job-name> <browseterm-cloud-api-url> <postgres-host> <postgres-port> <postgres-user> <postgres-password> <postgres-db> <socket-ssh-host> <socket-ssh-wss-url> <ingress-host> <payment-gateway-development-host> <payment-gateway-development-port> <payment-gateway-certs-secret-name>"
+if [ $# -lt 21 ]; then
+    echo "Usage: $0 <namespace> <absolute-path-to-current-working-directory> <repo-name> <container-maker-host> <container-maker-port> <container-maker-certs-secret-name> <cert-manager-cron-job-name> <browseterm-cloud-api-url> <postgres-host> <postgres-port> <postgres-user> <postgres-password> <postgres-db> <socket-ssh-host> <socket-ssh-wss-url> <ingress-host> <payment-gateway-development-host> <payment-gateway-development-port> <payment-gateway-certs-secret-name> <cloud-ingress-host> <cloud-ingress-host-ip>"
     exit 1
 fi
 
@@ -28,6 +28,9 @@ INGRESS_HOST=${16}
 PAYMENT_GATEWAY_DEVELOPMENT_HOST=${17}
 PAYMENT_GATEWAY_DEVELOPMENT_PORT=${18}
 PAYMENT_GATEWAY_CERTS_SECRET_NAME=${19}
+# P13 - see the note in infra/deployment/deployment.yaml. See SETUP-LOCAL.md.
+CLOUD_INGRESS_HOST=${20}
+CLOUD_INGRESS_HOST_IP=${21}
 
 export NAMESPACE=$NAMESPACE
 export HOSTPATH=$HOSTPATH
@@ -48,4 +51,6 @@ export POSTGRES_DB=$POSTGRES_DB
 export SOCKET_SSH_HOST=$SOCKET_SSH_HOST
 export SOCKET_SSH_WSS_URL=$SOCKET_SSH_WSS_URL
 export INGRESS_HOST=$INGRESS_HOST
+export CLOUD_INGRESS_HOST=$CLOUD_INGRESS_HOST
+export CLOUD_INGRESS_HOST_IP=$CLOUD_INGRESS_HOST_IP
 envsubst < $YAML | kubectl apply -f -

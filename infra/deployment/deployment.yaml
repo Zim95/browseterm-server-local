@@ -58,6 +58,23 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+      # P13 - a real, previously-undiscovered gap found while live-verifying P13: on the local dev
+      # topology this project actually uses (two SEPARATE k3d clusters - browseterm-k3s (Cloud)
+      # and browseterm-k3s-local (Local) - on the SAME Mac, each its own Docker bridge network,
+      # both reachable from the host machine only via /etc/hosts entries pointing at 127.0.0.1),
+      # a pod inside browseterm-k3s-local resolving BROWSETERM_CLOUD_API_URL's hostname
+      # (browseterm.cloud.com) does NOT see that host-only /etc/hosts override - it resolves via
+      # the cluster's own DNS, which (on Docker Desktop for Mac) forwards unresolved external
+      # names right back to loopback, so every in-pod call to Cloud silently connected to itself
+      # instead. Cross-cluster traffic on this topology has to go through the HOST's actual
+      # network via Docker Desktop's host.docker.internal, which IS reachable from any container
+      # regardless of which cluster's bridge network it's on. This override only matters for this
+      # specific single-Mac two-cluster dev setup - see SETUP-LOCAL.md for how to determine
+      # CLOUD_INGRESS_HOST_IP.
+      hostAliases:
+      - ip: "${CLOUD_INGRESS_HOST_IP}"
+        hostnames:
+        - "${CLOUD_INGRESS_HOST}"
       containers:
       - name: browseterm-server
         image: ${REPO_NAME}/browseterm-server:latest
@@ -94,6 +111,20 @@ spec:
           value: ${NAMESPACE}
         - name: BROWSETERM_CLOUD_API_URL
           value: ${BROWSETERM_CLOUD_API_URL}
+        # P13 (see ~/browseterm/p.md's "P13" section) - a real, previously-undiscovered gap found
+        # while live-verifying P13: this was never actually wired in anywhere, so every
+        # internal-token-gated call this repo makes to Cloud (session validate/delete, container
+        # create/update/delete, catalog, sse-tokens - effectively everything in src/cloud_client/
+        # client.py except the public possession-gated handoff redemption) has been silently
+        # getting a 401 from Cloud in any cluster where this was never manually set. Must match
+        # Cloud's own CLOUD_INTERNAL_API_TOKEN (see browseterm-server/infra/cloud/cloud.yaml) -
+        # same browseterm-internal-api-token Secret, created the same way in both clusters (not by
+        # either setup script - see README's Dev Setup prerequisites).
+        - name: CLOUD_INTERNAL_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: browseterm-internal-api-token
+              key: CLOUD_INTERNAL_API_TOKEN
         # P07: no REDIS_* here any more - see the identical note in infra/development/development.yaml.
         # HOST/PORT are non-secret config (kept as literals). USER/PASSWORD/DB come from the
         # browseterm-db-credentials Secret (same Postgres creds the workload components use) so the

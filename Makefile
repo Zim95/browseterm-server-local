@@ -25,7 +25,9 @@ dev_setup:
 		$(INGRESS_HOST) \
 		$(PAYMENT_GATEWAY_DEVELOPMENT_HOST) \
 		$(PAYMENT_GATEWAY_DEVELOPMENT_PORT) \
-		$(PAYMENT_GATEWAY_CERTS_SECRET_NAME)
+		$(PAYMENT_GATEWAY_CERTS_SECRET_NAME) \
+		$(CLOUD_INGRESS_HOST) \
+		$(CLOUD_INGRESS_HOST_IP)
 
 dev_teardown:
 	./scripts/development/development-teardown.sh $(NAMESPACE)
@@ -55,7 +57,9 @@ prod_setup:
 		$(COOKIE_SAMESITE) \
 		$(PAYMENT_GATEWAY_HOST) \
 		$(PAYMENT_GATEWAY_PORT) \
-		$(PAYMENT_GATEWAY_CERTS_SECRET_NAME)
+		$(PAYMENT_GATEWAY_CERTS_SECRET_NAME) \
+		$(CLOUD_INGRESS_HOST) \
+		$(CLOUD_INGRESS_HOST_IP)
 
 prod_teardown:
 	./scripts/deployment/deployment-teardown.sh $(NAMESPACE)

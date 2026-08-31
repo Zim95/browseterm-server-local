@@ -289,7 +289,27 @@ async def create_container_in_k8s(request: Request) -> JSONResponse:
 
         # Create container in K8s using ContainerService
         container_service = ContainerService()
-        container_response = await container_service.create_container_in_k8s(create_container_k8s_request)
+        try:
+            container_response = await container_service.create_container_in_k8s(create_container_k8s_request)
+        except Exception:
+            # P13 (see ~/browseterm/p.md's "P13" section): the DB-row+resource-reservation step
+            # (create_container_in_db, a separate prior request) already succeeded by the time
+            # this handler runs - a failure here is exactly the "partial failure" the plan's P13
+            # entry calls out. Without this, a failed K8s/ContainerMaker creation would leak a
+            # permanently-PENDING row and its Cloud-side device resource reservation forever
+            # (nothing else ever calls delete on it), and the container's name would block any
+            # retry under the same name. Best-effort - a failure to clean up here does not hide
+            # the real k8s error from the caller below.
+            try:
+                await container_service.delete_container_in_db(
+                    DeleteContainerDBRequest(container_id=container_id, user_id=user_id)
+                )
+            except Exception:
+                logger.error(
+                    "failed to release container row/reservation after k8s creation failure",
+                    extra={"container_id": container_id}, exc_info=True,
+                )
+            raise
         return JSONResponse(content=container_response.model_dump())
     except HTTPException as e:
         return JSONResponse(content={'error': e.detail}, status_code=e.status_code)

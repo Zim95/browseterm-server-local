@@ -47,6 +47,14 @@ spec:
         app: browseterm-server-development
     spec:
       serviceAccountName: job-manager-service-account
+      # P13 - see the identical, longer note in infra/deployment/deployment.yaml: on this
+      # project's local dev topology (two separate k3d clusters on the same Mac), cross-cluster
+      # traffic to Cloud has to go through the host via Docker Desktop's host.docker.internal -
+      # see SETUP-LOCAL.md for how to determine CLOUD_INGRESS_HOST_IP.
+      hostAliases:
+      - ip: "${CLOUD_INGRESS_HOST_IP}"
+        hostnames:
+        - "${CLOUD_INGRESS_HOST}"
       containers:
       - name: browseterm-server-development
         image: ${REPO_NAME}/browseterm-server-development:latest
@@ -81,6 +89,14 @@ spec:
           value: ${NAMESPACE}
         - name: BROWSETERM_CLOUD_API_URL
           value: ${BROWSETERM_CLOUD_API_URL}
+        # P13 - see the identical, longer note in infra/deployment/deployment.yaml. Must match
+        # Cloud's own CLOUD_INTERNAL_API_TOKEN - same browseterm-internal-api-token Secret,
+        # created the same way in both clusters (not by either setup script).
+        - name: CLOUD_INTERNAL_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: browseterm-internal-api-token
+              key: CLOUD_INTERNAL_API_TOKEN
         # P07: no REDIS_* here any more - Local's last Redis use (session state) was removed the
         # session before this one (session_manager.py deleted outright, see p.md); these vars had
         # already gone unread since then, this just stops handing Local a copy of Cloud's Redis
