@@ -29,41 +29,15 @@ CERT_MANAGER_CRON_JOB_NAME: str = os.getenv("CERT_MANAGER_CRON_JOB_NAME")
 CERT_MANAGER_CRON_JOB_NAMESPACE: str = os.getenv("CERT_MANAGER_CRON_JOB_NAMESPACE")
 
 
-# Auth common config
-AUTH_REDIRECT_BASE_URI: str = os.getenv("AUTH_REDIRECT_BASE_URI", "http://localhost:9999")
-
-# Google Authentication Config
-GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET: str = os.getenv("GOOGLE_CLIENT_SECRET")
-GOOGLE_AUTH_META_URL: str = 'https://accounts.google.com/o/oauth2/auth'
-GOOGLE_AUTH_SCOPE: str = 'openid email profile'
-GOOGLE_AUTH_REDIRECT_URI: str = f"{AUTH_REDIRECT_BASE_URI}/google-login-redirect"
-GOOGLE_ACCESS_TOKEN_URL: str = 'https://oauth2.googleapis.com/token'
-GOOGLE_USER_INFO_URL: str = 'https://www.googleapis.com/oauth2/v2/userinfo'
-GOOGLE_TOKEN_EXCHANGE_HEADERS: dict = {'Content-Type': 'application/x-www-form-urlencoded'}
-
-# Github Authentication Config
-GITHUB_CLIENT_ID: str = os.getenv("GITHUB_CLIENT_ID")
-GITHUB_CLIENT_SECRET: str = os.getenv("GITHUB_CLIENT_SECRET")
-GITHUB_AUTH_META_URL: str = 'https://github.com/login/oauth/authorize'
-GITHUB_AUTH_SCOPE: str = 'user:email user'
-GITHUB_AUTH_REDIRECT_URI: str = f"{AUTH_REDIRECT_BASE_URI}/github-login-redirect"
-GITHUB_ACCESS_TOKEN_URL: str = 'https://github.com/login/oauth/access_token'
-GITHUB_USER_INFO_URL: str = 'https://api.github.com/user'
-GITHUB_TOKEN_EXCHANGE_HEADERS: dict = {
-    'Content-Type': 'application/x-www-form-urlencoded',
-    'Accept': 'application/json',
-    'Accept-Encoding': 'application/json'
-}
-
-# Redis Configuration
-REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
-REDIS_USERNAME: str = os.getenv("REDIS_USERNAME", "")
-REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
-REDIS_DB: int = int(os.getenv("REDIS_DB", "0"))
-REDIS_SESSION_EXPIRY: int = 86400
-REDIS_SESSION_PREFIX: str = "session:"
+# Auth common config (P07 - see p07.md)
+#
+# Local no longer holds Google/GitHub OAuth client id/secret, provider URLs, or a Redis client at
+# all - Cloud is the sole OAuth authority and the sole holder of those secrets
+# (browseterm-server/src/common/config.py). Local's only auth-related config now is: where to
+# send the browser to start OAuth (Cloud's public URL, src.cloud_client.config.
+# BROWSETERM_CLOUD_API_URL) and how long the browser-side session cookie should live (a client
+# hint only - Cloud's Redis TTL, extended on every authenticated call, is authoritative).
+SESSION_COOKIE_MAX_AGE: int = int(os.getenv("SESSION_COOKIE_MAX_AGE", "86400"))
 
 # Cookie Security Configuration
 # Set secure=True in production (HTTPS), False in development (HTTP)

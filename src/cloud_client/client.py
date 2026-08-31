@@ -11,20 +11,22 @@ The ONLY intended boundary through which Local code talks to central Cloud state
           v
     Cloud browseterm-server (browseterm.cloud.com)
 
-As of this task, Local holds no PostgreSQL/Redis client at all - every read or write of central
-state (sessions, users, containers, images, subscriptions) goes through here. Two different auth
-modes, matching who's asking:
+Local holds no PostgreSQL/Redis client at all - every read or write of central state (sessions,
+users, containers, images, subscriptions) goes through here. Two different auth modes, matching
+who's asking:
 
-- Device Cloud API (register/list/get/update/heartbeat, P05): called by Desktop directly, with
-  the end user's own session cookie.
-- Session/container/catalog/subscription API (this task): called by Local's own backend
-  server-to-server. Local has already turned an OAuth code into a verified profile itself, and -
-  after the first session-creation call - already knows the authenticated user_id from Cloud's
-  own session validation. These routes are gated by a shared secret
-  (CLOUD_INTERNAL_API_TOKEN / X-Internal-Service-Token) instead of a session cookie. This is
-  interim: the real fix is moving OAuth entirely onto Cloud (plan section 7.1 / P07), which
-  removes the need for Cloud to trust a caller's word for who the user is at all - tracked there,
-  not solved here.
+- Handoff redemption (`redeem_handoff`): public but possession-gated - no credential of Local's
+  own involved, security comes from holding the one-time code Cloud's OAuth callback minted.
+- Everything else (session validate/delete, device-bootstrap start, container/catalog/
+  subscription API): called by Local's own backend server-to-server, gated by a shared secret
+  (CLOUD_INTERNAL_API_TOKEN / X-Internal-Service-Token) - Local already knows the authenticated
+  user_id from Cloud's own session validation by the time it calls these.
+
+P07 (see `~/browseterm/p07.md`) moved OAuth issuance and the Device Cloud API off this client
+entirely: Local no longer performs token exchange (so `create_session` here now has no caller -
+Cloud's own OAuth callback creates the session in-process instead) and no longer calls the Device
+API at all (that moved to Bearer-device-token auth, called by `browseterm-desktop` directly
+through its own separate `CloudClient` - see that repo's README).
 """
 from typing import Any, Optional
 
@@ -91,25 +93,6 @@ class CloudClient:
             raise CloudClientError(response.status_code, message)
         return response.json()
 
-    # ---- Device Cloud API (P05) - end-user session cookie auth ----
-
-    def register_device(self, device: dict[str, Any]) -> dict:
-        """POST /devices. Raises CloudClientError(status_code=409) on a duplicate
-        (user_id, device_name) - per P05's actual semantics, this is NOT idempotent."""
-        return self._request("POST", "/devices", json_body=device)["device"]
-
-    def list_devices(self) -> list[dict]:
-        return self._request("GET", "/devices")["devices"]
-
-    def get_device(self, device_id: str) -> dict:
-        return self._request("GET", f"/devices/{device_id}")["device"]
-
-    def update_device(self, device_id: str, fields: dict[str, Any]) -> dict:
-        return self._request("POST", f"/devices/{device_id}", json_body=fields)["device"]
-
-    def heartbeat(self, device_id: str) -> dict:
-        return self._request("POST", f"/devices/{device_id}/heartbeat")["device"]
-
     # ---- Session/auth API - internal-service auth ----
 
     def create_session(self, user_info: dict[str, Any]) -> dict:
@@ -130,6 +113,21 @@ class CloudClient:
         """POST /auth/websocket-tokens. One-time, 60s-TTL token linking to the session, consumed
         by socket-ssh."""
         return self._request("POST", "/auth/websocket-tokens", json_body={"session_id": session_id})["token"]
+
+    # ---- OAuth handoff (P07) - public but possession-gated, no internal token needed ----
+
+    def redeem_handoff(self, code: str) -> dict:
+        """POST /auth/handoff/redeem. Returns {session_id, user_info, subscription_info,
+        current_subscription_plan} - raises CloudClientError(status_code=401) for an invalid/
+        expired/already-used code."""
+        return self._request("POST", "/auth/handoff/redeem", json_body={"code": code})
+
+    def create_device_bootstrap(self, user_id: str) -> str:
+        """POST /auth/device-bootstrap. Internal-service-token auth (same trust as
+        create_session/delete_session) - Local has already verified the caller's browser session
+        itself before calling this. Returns a one-time bootstrap code for Desktop to redeem
+        directly against Cloud's public POST /auth/device-bootstrap/redeem."""
+        return self._request("POST", "/auth/device-bootstrap", json_body={"user_id": user_id})["code"]
 
     # ---- Container/workspace metadata API - internal-service auth ----
 

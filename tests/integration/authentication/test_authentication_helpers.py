@@ -6,15 +6,11 @@ from unittest.mock import patch, MagicMock
 
 # local
 from src.authentication.authentication_helpers import (
-    process_user_info,
     validate_session,
     delete_session,
     authenticate_session,
 )
-from src.authentication.dto.user_info_dto import UserInfoModel
-from src.authentication.dto.session_dto import SessionResponseModel
 from src.cloud_client.client import CloudClientError
-from browseterm_db.models.users import AuthProvider
 from fastapi import Request
 from fastapi.responses import RedirectResponse
 
@@ -23,54 +19,18 @@ class TestAuthenticationHelpers(TestCase):
     '''
     Test authentication helper functions with the Postgres/Redis clients replaced by CloudClient
     (Local holds no DB/Redis client at all - every session operation is a Cloud HTTP call).
+
+    P07: session issuance (process_user_info) moved entirely to Cloud (it now happens inside
+    Cloud's own OAuth callback) - Local's authentication_helpers.py no longer has that function at
+    all, see src/api_handlers.py:auth_callback for the handoff-redemption flow that replaces it.
     '''
 
     def setUp(self) -> None:
         self.loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
-        self.user_info: UserInfoModel = UserInfoModel(
-            provider_id='test123',
-            name='Test User',
-            email='test@example.com',
-            profile_picture_url='https://example.com/pic.jpg',
-            provider=AuthProvider.GOOGLE
-        )
-
     def tearDown(self) -> None:
         self.loop.close()
-
-    @patch('src.authentication.authentication_helpers.CloudClient')
-    def test_process_user_info_success(self, mock_client_cls) -> None:
-        '''process_user_info hands the OAuth profile to Cloud and returns its session response.'''
-        mock_client = MagicMock()
-        mock_client.create_session.return_value = {
-            'session_id': 'test-session-123',
-            'user_info': {'id': 'u1', 'name': 'Test User'},
-            'subscription_info': {'id': 'sub1'},
-            'current_subscription_plan': {'id': 'plan1'},
-        }
-        mock_client_cls.return_value = mock_client
-
-        result: SessionResponseModel = self.loop.run_until_complete(process_user_info(self.user_info))
-
-        self.assertIsInstance(result, SessionResponseModel)
-        self.assertEqual(result.session_id, 'test-session-123')
-        self.assertEqual(result.user_info['id'], 'u1')
-        mock_client.create_session.assert_called_once()
-        sent_payload = mock_client.create_session.call_args.args[0]
-        self.assertEqual(sent_payload['provider_id'], 'test123')
-
-    @patch('src.authentication.authentication_helpers.CloudClient')
-    def test_process_user_info_failure(self, mock_client_cls) -> None:
-        '''A Cloud-call failure surfaces as an Exception, matching the previous behavior.'''
-        mock_client = MagicMock()
-        mock_client.create_session.side_effect = CloudClientError(500, 'boom')
-        mock_client_cls.return_value = mock_client
-
-        with self.assertRaises(Exception) as context:
-            self.loop.run_until_complete(process_user_info(self.user_info))
-        self.assertIn('Error creating session', str(context.exception))
 
     @patch('src.authentication.authentication_helpers.CloudClient')
     def test_validate_session_valid(self, mock_client_cls) -> None:

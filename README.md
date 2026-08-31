@@ -35,7 +35,7 @@ Every former direct-DB path has been migrated:
 
 | Former legacy direct-DB path | Now calls |
 |---|---|
-| `src/authentication/authentication_helpers.py` (session issuance/validation) | `CloudClient.create_session`/`validate_session`/`delete_session` -> Cloud `POST /auth/sessions*` |
+| `src/authentication/authentication_helpers.py` (session validate/delete) | `CloudClient.validate_session`/`delete_session` -> Cloud `POST /auth/sessions/validate`/`delete` |
 | `src/template_handlers.py`'s one-time WebSocket token | `CloudClient.create_websocket_token` -> Cloud `POST /auth/websocket-tokens` |
 | `src/status_listener.py` (was Postgres LISTEN/NOTIFY) | polls `CloudClient.list_containers` on an interval and diffs against the last-seen snapshot per user (see that module's docstring - real push-based delivery is P10's job, this is a documented interim simplification) |
 | `src/db_ops/container_db_ops.py`, `image_db_ops.py`, `subscription_db_ops.py` (container/image/subscription CRUD) | `CloudClient.create_container`/`get_container`/`list_containers`/`update_container`/`delete_container`/`list_images`/`list_subscription_types`/`get_current_subscription` |
@@ -57,11 +57,29 @@ DB client). Do not add a DB/Redis client import anywhere in this repo; if a futu
 need one, that's a sign the corresponding Cloud API is missing, not that this boundary should be
 broken.
 
-Interim auth caveat (unchanged, still real): `POST /auth/sessions` etc. are gated by a shared
-`CLOUD_INTERNAL_API_TOKEN` secret rather than a real per-request credential, because Local
-constructs the session-creation request itself after its own OAuth token exchange - there's no
-cookie for Cloud to check yet at that point. The actual fix (Cloud becomes the OAuth client
-entirely, plan section 7.1 / P07) removes the need for this trust-by-shared-secret model.
+**P07 (done - see `~/browseterm/p07.md` and `p.md`'s "P07" section): Cloud is now the sole OAuth
+authority.** This repo no longer performs Google/GitHub token exchange at all -
+`src/authentication/oauth_service.py` and its GOOGLE/GITHUB client id/secret config are gone
+entirely. The flow is now:
+
+1. `GET /auth/{provider}` (`src/api_handlers.py:auth_provider_redirect`) redirects the browser to
+   Cloud's `/auth/{provider}/start?target=local` - Cloud does the whole OAuth dance itself.
+2. Cloud's callback redirects the browser back to this repo's `GET /auth/callback?code=<handoff>`
+   (`src/api_handlers.py:auth_callback`), which redeems that one-time code against Cloud's public
+   `POST /auth/handoff/redeem` (`CloudClient.redeem_handoff`) to pick up the session Cloud already
+   created, and sets the HttpOnly `session` cookie (+ a non-HttpOnly `csrf_token` cookie, double-
+   submit CSRF pattern - see `src/api_handlers.py:_csrf_ok`).
+3. `POST /device/bootstrap` (`src/api_handlers.py:device_bootstrap`, session-cookie + CSRF
+   protected) lets `browseterm-desktop` trade the already-authenticated WebView session for a
+   one-time device-bootstrap code, which it redeems directly against Cloud's public
+   `POST /auth/device-bootstrap/redeem` for its own long-lived per-device Bearer credential -
+   Desktop never uses the browser session cookie as an ongoing credential (P06's interim
+   `BROWSETERM_SESSION_COOKIE` mechanism is gone).
+
+`POST /auth/sessions`/`/auth/sessions/validate`/`/auth/sessions/delete` still exist on Cloud and
+are still internal-token-gated (unchanged) - `validate`/`delete` are still called from here
+(`authenticate_session`, `logout`); `create` is called only by Cloud itself now (from its own
+OAuth callback), never by this repo.
 
 ## `src/cloud_client/` - the Local -> Cloud boundary
 
@@ -69,12 +87,13 @@ entirely, plan section 7.1 / P07) removes the need for this trust-by-shared-secr
 Local Handler -> CloudClient -> HTTPS -> Cloud browseterm-server (browseterm.cloud.com)
 ```
 
-The only intended way this repo's code reaches central Cloud state. Wraps the P05 Device Cloud
-API (register/list/get/update/heartbeat, end-user session-cookie auth) and the session/
-container/catalog/subscription API this repo's own handlers use (internal-service-token auth -
-see "Trust boundary" above) - do not add unrelated Cloud endpoints here without a corresponding
-Cloud API existing first. `browseterm-desktop` has its own, deliberately duplicated copy of the
-Device-API half of this package for the identical reason - see that repo's README.
+The only intended way this repo's code reaches central Cloud state. Wraps handoff redemption
+(public, possession-gated) and the session/device-bootstrap-start/container/catalog/subscription
+API this repo's own handlers use (internal-service-token auth - see "Trust boundary" above) - do
+not add unrelated Cloud endpoints here without a corresponding Cloud API existing first. The
+Device Cloud API itself (register/list/get/update/heartbeat) is **not** called from here as of
+P07 - it's Bearer-device-token authenticated now, and only `browseterm-desktop` calls it, through
+its own separate `CloudClient` (see that repo's README).
 
 `CLOUD_INTERNAL_API_TOKEN` must match the same env var on Cloud; unset (empty string default),
 `CloudClient` sends no `X-Internal-Service-Token` header at all, so the server-to-server routes
@@ -83,11 +102,6 @@ correctly reject it as unauthorized rather than silently proceeding.
 Default `BROWSETERM_CLOUD_API_URL` is `http://browseterm.cloud.com:9999` (Cloud's DNS
 convention, mirroring `browseterm.local.com` for Local); override for local development against
 a Cloud instance on this machine.
-
-Auth is interim (pre-P07): `CloudClient` takes the same opaque `session` cookie value the
-browser already holds after logging in through this repo's existing OAuth flow (Cloud and Local
-share one Redis pre-P07). See `src/cloud_client/client.py`'s module docstring for the full
-rationale and what P07 replaces it with.
 
 ## Cloning the repository
 ```
@@ -103,9 +117,23 @@ NOTE: This setup is a little different on windows. Please use WSL in windows.
     Basically, the script files wont work on windows and therefore, you need to manually setup.
     The developer of this repository hates working with windows.
 
-1. To Develop inside kubernetes, you need to first install Docker Desktop and follow this guideline: `https://docs.docker.com/desktop/features/kubernetes/`.
+Current convention is two `k3d` clusters (Docker-based, not Docker Desktop's built-in Kubernetes
+or a Multipass VM): `browseterm-k3s` for Cloud, `browseterm-k3s-local` for this repo (+
+container-maker/socket-ssh/payment-gateway/workloads) - see `~/browseterm/p.md`'s P06 addendum
+for the naming decision. `docker-desktop`'s own Kubernetes still works if you genuinely prefer
+it (the manifests don't care which provider `kubectl config current-context` points at), but if
+you use `k3d`, **disable k3s's bundled Traefik first** - its `svclb` squats on host ports 80/443
+and ingress-nginx's own `svclb` will sit `Pending` forever otherwise:
+`kubectl -n kube-system delete helmchart traefik` (already-running cluster) or
+`--k3s-arg '--disable=traefik@server:*'` at `k3d cluster create` time. Build images locally and
+`k3d image import <image> -c <cluster-name>` instead of pushing to a registry.
 
-2. Once `kubectl` is setup and you have the `docker-desktop` cluster ready. We can proceed further.
+1. To Develop inside kubernetes, install Docker (Desktop or just the Docker engine) and either
+   `k3d` (`brew install k3d`) or follow Docker Desktop's own Kubernetes guideline:
+   `https://docs.docker.com/desktop/features/kubernetes/`.
+
+2. Once `kubectl` is setup and you have your cluster ready (`k3d cluster create browseterm-k3s-local ...`
+   or the `docker-desktop` context), we can proceed further.
 
 3. Clone this repository. Follow the guide.
 
@@ -128,19 +156,9 @@ NOTE: This setup is a little different on windows. Please use WSL in windows.
     CONTAINER_MAKER_PORT=50052
     CONTAINER_MAKER_CERTS_SECRET_NAME=container-maker-development-service-certs
 
-    # GOOGLE CREDENTIALS
-    AUTH_REDIRECT_BASE_URI=http://localhost:9999
-    GOOGLE_CLIENT_ID=<your-google-client-id>
-    GOOGLE_CLIENT_SECRET=<your-google-client-secret>
-    GITHUB_CLIENT_ID=<your-github-client-id>
-    GITHUB_CLIENT_SECRET=<your-github-client-secret>
-
-    # REDIS CREDENTIALS
-    REDIS_HOST=browseterm-redis-service
-    REDIS_PORT=6379	
-    REDIS_PASSWORD=test123
-    REDIS_USERNAME=namah
-    REDIS_DB=0
+    # CLOUD (P07 - see ~/browseterm/p07.md: Cloud is the sole OAuth authority, Local holds no
+    # Google/GitHub credential and no Redis client at all any more)
+    BROWSETERM_CLOUD_API_URL=http://browseterm.cloud.com:9999
 
     # POSTGRES CREDENTIALS
     POSTGRES_HOST=browseterm-pg-service

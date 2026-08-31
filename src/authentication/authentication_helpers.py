@@ -1,5 +1,5 @@
 # builtins
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from functools import wraps
 
 # modules
@@ -9,33 +9,6 @@ from fastapi.responses import RedirectResponse
 # local
 from src.common.logging_setup import set_request_context
 from src.cloud_client.client import CloudClient, CloudClientError
-
-# dtos
-from src.authentication.dto.session_dto import SessionResponseModel
-from src.authentication.dto.user_info_dto import UserInfoModel
-
-
-async def process_user_info(user_info: UserInfoModel) -> SessionResponseModel:
-    '''
-    Turn a verified OAuth profile into a session.
-
-    Local no longer creates/updates the user row, resolves their subscription, or writes the
-    Redis session itself - Cloud's POST /auth/sessions does all of that (it's the only process
-    allowed to touch Postgres/Redis). Local's job is just the OAuth token exchange that produced
-    `user_info` (see oauth_service.py) and handing the resulting verified profile to Cloud.
-
-    Raises:
-        Exception: if the Cloud session-creation call fails
-    '''
-    try:
-        client = CloudClient()
-        payload = user_info.model_dump(mode="json")
-        response = client.create_session(payload)
-        return SessionResponseModel(**response)
-    except CloudClientError as e:
-        raise Exception(f"Error creating session: {e.message}")
-    except Exception as e:
-        raise Exception(f"Error processing user info: {str(e)}")
 
 
 async def validate_session(session_id: str) -> Dict[str, Any]:

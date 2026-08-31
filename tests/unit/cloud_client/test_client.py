@@ -15,79 +15,57 @@ def _mock_response(status_code: int, json_body: dict):
 class TestCloudClientBoundary(unittest.TestCase):
     """The CloudClient must be the only place cookie/HTTP wiring happens, and must never touch
     browseterm_db/DB_CONFIG/POSTGRES_*/REDIS_* - verified statically (no such import exists in
-    src/cloud_client/*) and behaviorally here (every request goes through httpx.request)."""
+    src/cloud_client/*) and behaviorally here (every request goes through httpx.request).
+
+    P07: the Device Cloud API is no longer called from here at all (moved to Bearer-device-token
+    auth, called by browseterm-desktop's own separate CloudClient) - these boundary properties are
+    now exercised via handoff_redeem/validate_session instead of the removed register_device/
+    list_devices/etc."""
 
     @patch("src.cloud_client.client.httpx.request")
-    def test_register_device_sends_session_cookie(self, mock_request):
-        mock_request.return_value = _mock_response(201, {"device": {"id": "d1"}})
-        client = CloudClient(base_url="http://cloud.test", session_cookie="abc123")
-
-        result = client.register_device({"device_name": "mac-1"})
-
-        self.assertEqual(result, {"id": "d1"})
-        args, kwargs = mock_request.call_args
-        self.assertEqual(args[0], "POST")
-        self.assertEqual(args[1], "http://cloud.test/devices")
-        self.assertEqual(kwargs["cookies"], {"session": "abc123"})
-        self.assertEqual(kwargs["json"], {"device_name": "mac-1"})
-
-    @patch("src.cloud_client.client.httpx.request")
-    def test_no_cookie_sends_no_cookie_header(self, mock_request):
-        mock_request.return_value = _mock_response(200, {"devices": []})
+    def test_redeem_handoff_sends_code_no_cookie_needed(self, mock_request):
+        mock_request.return_value = _mock_response(200, {"session_id": "s1", "user_info": {"id": "u1"}})
         client = CloudClient(base_url="http://cloud.test")
 
-        client.list_devices()
+        result = client.redeem_handoff("handoff-code-1")
 
-        self.assertEqual(mock_request.call_args.kwargs["cookies"], {})
+        self.assertEqual(result["session_id"], "s1")
+        args, kwargs = mock_request.call_args
+        self.assertEqual(args[0], "POST")
+        self.assertEqual(args[1], "http://cloud.test/auth/handoff/redeem")
+        self.assertEqual(kwargs["json"], {"code": "handoff-code-1"})
 
     @patch("src.cloud_client.client.httpx.request")
-    def test_duplicate_device_raises_409_not_swallowed(self, mock_request):
-        mock_request.return_value = _mock_response(
-            409, {"error": "User not found or device name already registered for this user"}
-        )
-        client = CloudClient(base_url="http://cloud.test", session_cookie="abc123")
+    def test_invalid_handoff_raises_401_not_swallowed(self, mock_request):
+        mock_request.return_value = _mock_response(401, {"error": "Invalid or expired handoff code"})
+        client = CloudClient(base_url="http://cloud.test")
 
         with self.assertRaises(CloudClientError) as ctx:
-            client.register_device({"device_name": "mac-1"})
-        self.assertEqual(ctx.exception.status_code, 409)
+            client.redeem_handoff("bogus")
+        self.assertEqual(ctx.exception.status_code, 401)
 
     @patch("src.cloud_client.client.httpx.request")
-    def test_get_device_404_raises(self, mock_request):
-        mock_request.return_value = _mock_response(404, {"error": "Device not found"})
-        client = CloudClient(base_url="http://cloud.test", session_cookie="abc123")
+    def test_create_device_bootstrap_sends_internal_token_and_user_id(self, mock_request):
+        mock_request.return_value = _mock_response(200, {"code": "bootstrap-code-1"})
+        client = CloudClient(base_url="http://cloud.test", internal_token="tok")
 
-        with self.assertRaises(CloudClientError) as ctx:
-            client.get_device("nonexistent")
-        self.assertEqual(ctx.exception.status_code, 404)
+        result = client.create_device_bootstrap("u1")
 
-    @patch("src.cloud_client.client.httpx.request")
-    def test_update_device_posts_only_given_fields(self, mock_request):
-        mock_request.return_value = _mock_response(200, {"device": {"id": "d1", "allocated_cpu": 4}})
-        client = CloudClient(base_url="http://cloud.test", session_cookie="abc123")
-
-        client.update_device("d1", {"allocated_cpu": 4})
-
-        self.assertEqual(mock_request.call_args.kwargs["json"], {"allocated_cpu": 4})
-        self.assertEqual(mock_request.call_args.args[1], "http://cloud.test/devices/d1")
-
-    @patch("src.cloud_client.client.httpx.request")
-    def test_heartbeat_hits_heartbeat_path(self, mock_request):
-        mock_request.return_value = _mock_response(200, {"device": {"id": "d1"}})
-        client = CloudClient(base_url="http://cloud.test", session_cookie="abc123")
-
-        client.heartbeat("d1")
-
-        self.assertEqual(mock_request.call_args.args[1], "http://cloud.test/devices/d1/heartbeat")
+        self.assertEqual(result, "bootstrap-code-1")
+        args, kwargs = mock_request.call_args
+        self.assertEqual(args[1], "http://cloud.test/auth/device-bootstrap")
+        self.assertEqual(kwargs["json"], {"user_id": "u1"})
+        self.assertEqual(kwargs["headers"], {"X-Internal-Service-Token": "tok"})
 
     @patch("src.cloud_client.client.httpx.request")
     def test_transport_failure_raises_cloud_client_error_status_zero(self, mock_request):
         import httpx
 
         mock_request.side_effect = httpx.ConnectError("connection refused")
-        client = CloudClient(base_url="http://cloud.test", session_cookie="abc123")
+        client = CloudClient(base_url="http://cloud.test")
 
         with self.assertRaises(CloudClientError) as ctx:
-            client.list_devices()
+            client.redeem_handoff("x")
         self.assertEqual(ctx.exception.status_code, 0)
 
 

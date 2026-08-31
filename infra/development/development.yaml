@@ -79,26 +79,12 @@ spec:
           value: ${CERT_MANAGER_CRON_JOB_NAME}
         - name: CERT_MANAGER_CRON_JOB_NAMESPACE
           value: ${NAMESPACE}
-        - name: AUTH_REDIRECT_BASE_URI
-          value: ${AUTH_REDIRECT_BASE_URI}
-        - name: GOOGLE_CLIENT_ID
-          value: ${GOOGLE_CLIENT_ID}
-        - name: GOOGLE_CLIENT_SECRET
-          value: ${GOOGLE_CLIENT_SECRET}
-        - name: GITHUB_CLIENT_ID
-          value: ${GITHUB_CLIENT_ID}
-        - name: GITHUB_CLIENT_SECRET
-          value: ${GITHUB_CLIENT_SECRET}
-        - name: REDIS_HOST
-          value: "${REDIS_HOST}"
-        - name: REDIS_PORT
-          value: "${REDIS_PORT}"
-        - name: REDIS_PASSWORD
-          value: "${REDIS_PASSWORD}"
-        - name: REDIS_USERNAME
-          value: "${REDIS_USERNAME}"
-        - name: REDIS_DB
-          value: "${REDIS_DB}"
+        - name: BROWSETERM_CLOUD_API_URL
+          value: ${BROWSETERM_CLOUD_API_URL}
+        # P07: no REDIS_* here any more - Local's last Redis use (session state) was removed the
+        # session before this one (session_manager.py deleted outright, see p.md); these vars had
+        # already gone unread since then, this just stops handing Local a copy of Cloud's Redis
+        # credentials it can't use (p07.md section 39's deployment-YAML audit).
         # HOST/PORT are non-secret config (kept as literals). USER/PASSWORD/DB come from the
         # browseterm-db-credentials Secret (same Postgres creds the workload components use) so the
         # password is never templated into this manifest.

@@ -1,205 +1,105 @@
 '''
-Authentication Service.
-Main orchestrator for authentication operations.
-Handles OAuth login, session management, and user authentication.
+Authentication Service - Local's browser-facing session handling (P07).
+
+P07 change: Local no longer performs Google/GitHub token exchange itself (that code - and the
+GOOGLE/GITHUB client id/secret it needed - moved to Cloud entirely, see p07.md). Login now
+completes by redeeming a one-time handoff code Cloud already minted after finishing OAuth itself
+(`complete_login_from_handoff`), not by exchanging a provider code
+(`GoogleAuthenticationService`/`GithubAuthenticationService` and `login()` are removed).
 '''
 
 # builtins
-import asyncio
+import json
+import secrets
 from typing import Optional
 
 # fastapi
-from fastapi import Request, HTTPException
+from fastapi import HTTPException
 from fastapi.responses import Response
-import json
 
 # local services
-from src.authentication.oauth_service import GoogleUserInfoService, GithubUserInfoService
-from src.authentication.authentication_helpers import (
-    delete_session,
-    process_user_info,
-    validate_session as validate_session_via_cloud,
-)
+from src.authentication.authentication_helpers import delete_session, validate_session as validate_session_via_cloud
+from src.cloud_client.client import CloudClient, CloudClientError
 
 # dtos
-from src.authentication.dto.user_info_dto import UserInfoModel
-from src.authentication.dto.token_exchange_dto import TokenExchangeRequestModel
-from src.authentication.dto.session_dto import SessionResponseModel
-from src.authentication.dto.login_response_dto import LoginResponseModel
 from src.authentication.dto.logout_dto import LogoutResponseModel
 
 # config
-from src.common.config import REDIS_SESSION_EXPIRY, COOKIE_SECURE, COOKIE_SAMESITE
+from src.common.config import SESSION_COOKIE_MAX_AGE, COOKIE_SECURE, COOKIE_SAMESITE
 
 # logging
 from src.common.logging_setup import get_logger
 
 logger = get_logger("authentication_service")
 
+CSRF_COOKIE_NAME = "csrf_token"
+
 
 class AuthenticationService:
-    '''
-    Main authentication service orchestrator.
-    Handles all authentication-related operations.
-    '''
+    '''Local's browser-facing session handling: complete login from a Cloud-issued handoff, log
+    out, validate. Never talks to Google/GitHub or Cloud's Postgres/Redis directly.'''
 
-    def __init__(self) -> None:
+    async def complete_login_from_handoff(self, code: str) -> Response:
         '''
-        Initialize the authentication service.
-        '''
-        self.google_service: GoogleUserInfoService = GoogleUserInfoService()
-        self.github_service: GithubUserInfoService = GithubUserInfoService()
-
-    async def fetch_user_info(self, code: str) -> Optional[UserInfoModel]:
-        '''
-        Fetch user info from the provider.
-        Must be implemented by subclasses.
-        '''
-        raise NotImplementedError("Please implement fetch_user_info!")
-
-    async def login(self, request: TokenExchangeRequestModel) -> Response:
-        '''
-        Handle OAuth login flow.
-        1. Exchange code for user info (provider-specific via fetch_user_info)
-        2. Create or update user in database
-        3. Create session
-        4. Return response with session cookie OR error JSON
-        Args:
-            request: TokenExchangeRequestModel containing OAuth code
-        Returns:
-            Response with session cookie and user data, or error response with details
+        Redeem a one-time handoff code from Cloud's OAuth callback and establish the local
+        browser session cookie. Also sets a non-HttpOnly CSRF cookie (double-submit pattern -
+        see api_handlers.py's CSRF check on /logout and /device/bootstrap).
         '''
         try:
-            # Fetch user info from the provider
-            user_info: Optional[UserInfoModel] = await self.fetch_user_info(request.code)
-            if not user_info:
-                error_message: str = "Failed to fetch user information from authentication provider. Please try again."
-                logger.error("login error", extra={"error": error_message})
-                return Response(
-                    content=json.dumps({"error": error_message, "detail": error_message}),
-                    media_type="application/json",
-                    status_code=400
-                )
-            # Process user info and create session
-            session_response: SessionResponseModel = await process_user_info(user_info)
-            if not session_response.session_id:
-                error_message: str = "Failed to create session. Please try again."
-                logger.error("login error", extra={"error": error_message})
-                return Response(
-                    content=json.dumps({"error": error_message, "detail": error_message}),
-                    media_type="application/json",
-                    status_code=500
-                )
-            # Create response with session cookie
-            response_data: dict = session_response.model_dump()
-            response = Response(
-                content=json.dumps(response_data),
-                media_type="application/json",
-                status_code=200
-            )
-            response.set_cookie(
-                key="session",
-                value=session_response.session_id,
-                max_age=REDIS_SESSION_EXPIRY,
-                httponly=True,
-                secure=COOKIE_SECURE,
-                samesite=COOKIE_SAMESITE
-            )
-            return response
-        except Exception as e:
-            logger.error("login error", exc_info=True)
-            # Return error response with details
-            error_detail: str = str(e) if str(e) else "An unexpected error occurred"
-            error_message: str = f"Login failed: {error_detail}"
+            session_response: dict = CloudClient().redeem_handoff(code)
+        except CloudClientError as e:
+            logger.warning("handoff redemption failed", extra={"status_code": e.status_code})
             return Response(
-                content=json.dumps({"error": error_message, "detail": error_message}),
+                content=json.dumps({"error": "Login failed. Please try again.", "detail": e.message}),
                 media_type="application/json",
-                status_code=500
+                status_code=400 if e.status_code < 500 else 500,
             )
+
+        response = Response(
+            content=json.dumps(session_response), media_type="application/json", status_code=200
+        )
+        response.set_cookie(
+            key="session",
+            value=session_response["session_id"],
+            max_age=SESSION_COOKIE_MAX_AGE,
+            httponly=True,
+            secure=COOKIE_SECURE,
+            samesite=COOKIE_SAMESITE,
+        )
+        # Deliberately NOT httponly - the double-submit CSRF pattern requires JS to be able to
+        # read this and echo it back as a header (see api_handlers.py). It is not a secret on its
+        # own (an attacker who can read this cookie cross-site could already read the response
+        # body); its only job is proving the request came from same-origin JS, not a cross-site
+        # form/fetch riding the ambient session cookie.
+        response.set_cookie(
+            key=CSRF_COOKIE_NAME,
+            value=secrets.token_urlsafe(32),
+            max_age=SESSION_COOKIE_MAX_AGE,
+            httponly=False,
+            secure=COOKIE_SECURE,
+            samesite=COOKIE_SAMESITE,
+        )
+        return response
 
     async def logout(self, session_id: Optional[str] = None) -> Response:
-        '''
-        Handle user logout.
-        1. Delete session from Redis
-        2. Clear session cookie
-        Args:
-            session_id: Optional session ID to delete
-        Returns:
-            Response with cleared cookie
-        Raises:
-            HTTPException: On logout failure
-        '''
         try:
-            # Delete session (via Cloud) if session_id provided
             if session_id:
                 await delete_session(session_id)
-            # Create logout response
-            logout_data: LogoutResponseModel = LogoutResponseModel(
-                message="Logged out successfully",
-                success=True
-            )
+            logout_data = LogoutResponseModel(message="Logged out successfully", success=True)
             response = Response(
-                content=json.dumps(logout_data.model_dump()),
-                media_type="application/json",
-                status_code=200
+                content=json.dumps(logout_data.model_dump()), media_type="application/json", status_code=200
             )
             response.set_cookie(
-                key="session",
-                value="",
-                max_age=0,
-                httponly=True,
-                secure=COOKIE_SECURE,
-                samesite=COOKIE_SAMESITE
+                key="session", value="", max_age=0, httponly=True, secure=COOKIE_SECURE, samesite=COOKIE_SAMESITE
+            )
+            response.set_cookie(
+                key=CSRF_COOKIE_NAME, value="", max_age=0, httponly=False, secure=COOKIE_SECURE,
+                samesite=COOKIE_SAMESITE,
             )
             return response
-        except Exception as e:
+        except Exception:
             logger.error("logout error", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
 
     async def validate_session(self, session_id: str) -> dict:
-        '''
-        Validate a session via Cloud (also extends it on success - see
-        authentication_helpers.validate_session).
-
-        Args:
-            session_id: Session ID to validate
-        Returns:
-            {"is_valid": bool, "user_info"?, "subscription_info"?, "current_subscription_plan"?}
-        '''
         return await validate_session_via_cloud(session_id)
-
-
-class GoogleAuthenticationService(AuthenticationService):
-    '''
-    Google authentication service.
-    Handles all Google authentication-related operations.
-    '''
-    def __init__(self) -> None:
-        '''
-        Initialize the Google authentication service.
-        '''
-        super().__init__()
-
-    async def fetch_user_info(self, code: str) -> Optional[UserInfoModel]:
-        '''
-        Fetch user info from Google.
-        '''
-        return await self.google_service.fetch_user_info(code)
-
-
-class GithubAuthenticationService(AuthenticationService):
-    '''
-    Github authentication service.
-    Handles all Github authentication-related operations.
-    '''
-    def __init__(self) -> None:
-        '''
-        Initialize the Github authentication service.
-        '''
-        super().__init__()
-
-    async def fetch_user_info(self, code: str) -> Optional[UserInfoModel]:
-        '''
-        Fetch user info from Github.
-        '''
-        return await self.github_service.fetch_user_info(code)

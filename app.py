@@ -63,17 +63,17 @@ app.add_api_route(path="/payment", endpoint=template_handlers.payment, methods=[
 app.add_api_route(path="/profile", endpoint=template_handlers.profile, methods=["GET"])
 app.add_api_route(path="/login", endpoint=template_handlers.login, methods=["GET"])
 
-# authentication templates
-app.add_api_route(path="/google-login-redirect", endpoint=template_handlers.google_login_redirect, methods=["GET"])
-app.add_api_route(path="/github-login-redirect", endpoint=template_handlers.github_login_redirect, methods=["GET"])
-
 # hidden routes (not in sidebar)
 app.add_api_route(path="/js-test", endpoint=template_handlers.js_test, methods=["GET"])
 
-# authentication apis
-app.add_api_route(path="/google-token-exchange", endpoint=api_handlers.google_token_exchange, methods=["POST"])
-app.add_api_route(path="/github-token-exchange", endpoint=api_handlers.github_token_exchange, methods=["POST"])
+# authentication apis (P07 - Cloud is the sole OAuth authority, see p07.md and
+# src/authentication/__init__.py for the full flow). /auth/callback is registered BEFORE the
+# /auth/{provider} wildcard - Starlette matches routes in registration order, so the exact path
+# must come first or it would be swallowed by {provider}="callback".
+app.add_api_route(path="/auth/callback", endpoint=api_handlers.auth_callback, methods=["GET"])
+app.add_api_route(path="/auth/{provider}", endpoint=api_handlers.auth_provider_redirect, methods=["GET"])
 app.add_api_route(path="/logout", endpoint=api_handlers.logout, methods=["POST"])
+app.add_api_route(path="/device/bootstrap", endpoint=api_handlers.device_bootstrap, methods=["POST"])
 
 # container apis
 app.add_api_route(path="/get-container-info/{container_id}", endpoint=api_handlers.get_container_info, methods=["GET"])

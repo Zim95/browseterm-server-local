@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Check if enough arguments are provided
-if [ $# -lt 28 ]; then
-    echo "Usage: $0 <namespace> <absolute-path-to-current-working-directory> <repo-name> <container-maker-host> <container-maker-port> <container-maker-certs-secret-name> <cert-manager-cron-job-name> <auth-redirect-base-uri> <google-client-id> <google-client-secret> <github-client-id> <github-client-secret> <redis-host> <redis-port> <redis-password> <redis-username> <redis-db> <postgres-host> <postgres-port> <postgres-user> <postgres-password> <postgres-db> <socket-ssh-host> <socket-ssh-wss-url> <ingress-host> <payment-gateway-development-host> <payment-gateway-development-port> <payment-gateway-certs-secret-name>"
+if [ $# -lt 19 ]; then
+    echo "Usage: $0 <namespace> <absolute-path-to-current-working-directory> <repo-name> <container-maker-host> <container-maker-port> <container-maker-certs-secret-name> <cert-manager-cron-job-name> <browseterm-cloud-api-url> <postgres-host> <postgres-port> <postgres-user> <postgres-password> <postgres-db> <socket-ssh-host> <socket-ssh-wss-url> <ingress-host> <payment-gateway-development-host> <payment-gateway-development-port> <payment-gateway-certs-secret-name>"
     exit 1
 fi
 
@@ -14,27 +14,20 @@ CONTAINER_MAKER_DEVELOPMENT_HOST=$4
 CONTAINER_MAKER_DEVELOPMENT_PORT=$5
 CONTAINER_MAKER_CERTS_SECRET_NAME=$6
 CERT_MANAGER_CRON_JOB_NAME=$7
-AUTH_REDIRECT_BASE_URI=$8
-GOOGLE_CLIENT_ID=$9
-GOOGLE_CLIENT_SECRET=${10}
-GITHUB_CLIENT_ID=${11}
-GITHUB_CLIENT_SECRET=${12}
-REDIS_HOST=${13}
-REDIS_PORT=${14}
-REDIS_PASSWORD=${15}
-REDIS_USERNAME=${16}
-REDIS_DB=${17}
-POSTGRES_HOST=${18}
-POSTGRES_PORT=${19}
-POSTGRES_USER=${20}
-POSTGRES_PASSWORD=${21}
-POSTGRES_DB=${22}
-SOCKET_SSH_HOST=${23}
-SOCKET_SSH_WSS_URL=${24}
-INGRESS_HOST=${25}
-PAYMENT_GATEWAY_DEVELOPMENT_HOST=${26}
-PAYMENT_GATEWAY_DEVELOPMENT_PORT=${27}
-PAYMENT_GATEWAY_CERTS_SECRET_NAME=${28}
+# P07: Local no longer performs OAuth itself (see p07.md) - it just needs to know where Cloud is,
+# not a redirect-base-URI or any Google/GitHub credential.
+BROWSETERM_CLOUD_API_URL=$8
+POSTGRES_HOST=$9
+POSTGRES_PORT=${10}
+POSTGRES_USER=${11}
+POSTGRES_PASSWORD=${12}
+POSTGRES_DB=${13}
+SOCKET_SSH_HOST=${14}
+SOCKET_SSH_WSS_URL=${15}
+INGRESS_HOST=${16}
+PAYMENT_GATEWAY_DEVELOPMENT_HOST=${17}
+PAYMENT_GATEWAY_DEVELOPMENT_PORT=${18}
+PAYMENT_GATEWAY_CERTS_SECRET_NAME=${19}
 
 export NAMESPACE=$NAMESPACE
 export HOSTPATH=$HOSTPATH
@@ -46,16 +39,7 @@ export CERT_MANAGER_CRON_JOB_NAME=$CERT_MANAGER_CRON_JOB_NAME
 export PAYMENT_GATEWAY_DEVELOPMENT_HOST=$PAYMENT_GATEWAY_DEVELOPMENT_HOST
 export PAYMENT_GATEWAY_DEVELOPMENT_PORT=$PAYMENT_GATEWAY_DEVELOPMENT_PORT
 export PAYMENT_GATEWAY_CERTS_SECRET_NAME=$PAYMENT_GATEWAY_CERTS_SECRET_NAME
-export AUTH_REDIRECT_BASE_URI=$AUTH_REDIRECT_BASE_URI
-export GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID
-export GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET
-export GITHUB_CLIENT_ID=$GITHUB_CLIENT_ID
-export GITHUB_CLIENT_SECRET=$GITHUB_CLIENT_SECRET
-export REDIS_HOST=$REDIS_HOST
-export REDIS_PORT=$REDIS_PORT
-export REDIS_PASSWORD=$REDIS_PASSWORD
-export REDIS_USERNAME=$REDIS_USERNAME
-export REDIS_DB=$REDIS_DB
+export BROWSETERM_CLOUD_API_URL=$BROWSETERM_CLOUD_API_URL
 export POSTGRES_HOST=$POSTGRES_HOST
 export POSTGRES_PORT=$POSTGRES_PORT
 export POSTGRES_USER=$POSTGRES_USER

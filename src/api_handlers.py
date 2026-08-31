@@ -6,7 +6,7 @@ Their job is to parse request data, call some class and return response data.
 import asyncio
 from datetime import datetime, timezone
 from fastapi import Request, HTTPException
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 import json
 from typing import AsyncGenerator
 
@@ -18,7 +18,9 @@ from src.data_models.payments import CreatePaymentRequest
 from src.payments.payments_service import PaymentService
 from src.common.exceptions import PaymentGatewayException, PaymentGatewayUnavailableException
 from src.authentication.authentication_helpers import authenticate_session
-from src.authentication.authentication_service import GoogleAuthenticationService, GithubAuthenticationService
+from src.authentication.authentication_service import AuthenticationService, CSRF_COOKIE_NAME
+from src.cloud_client.client import CloudClient, CloudClientError
+from src.cloud_client.config import BROWSETERM_CLOUD_API_URL
 from src.common.logging_setup import get_logger, request_id_var
 from src.db_ops.container_db_ops import get_container_by_id, list_user_containers as list_user_containers_db, update_container_fields
 from src.db_ops.subscription_db_ops import get_user_current_subscription_plan
@@ -29,35 +31,84 @@ logger = get_logger("api_handlers")
 
 
 # dtos
-from src.authentication.dto.token_exchange_dto import TokenExchangeRequestModel
 from src.status_listener import status_listener_service
 
 
-async def google_token_exchange(request: TokenExchangeRequestModel) -> Response:
-    '''
-    Exchange Google OAuth code for tokens, fetch user details and create session.
-    Uses GoogleAuthenticationService following Open-Closed Principle.
-    '''
-    auth_service: GoogleAuthenticationService = GoogleAuthenticationService()
-    return await auth_service.login(request)
+def _csrf_ok(request: Request) -> bool:
+    '''Double-submit CSRF check (p07.md section 30) for cookie-authenticated state-changing
+    routes: the non-HttpOnly csrf_token cookie set at login must be echoed back as a header by
+    same-origin JS. A cross-site form/fetch riding the ambient session cookie cannot read that
+    cookie to echo it, so this fails closed for it. Only applied to cookie-authenticated routes -
+    device Bearer-token requests are explicitly NOT subjected to this (p07.md section 30).'''
+    header_token = request.headers.get("X-CSRF-Token")
+    cookie_token = request.cookies.get(CSRF_COOKIE_NAME)
+    return bool(header_token) and bool(cookie_token) and header_token == cookie_token
 
 
-async def github_token_exchange(request: TokenExchangeRequestModel) -> Response:
+async def auth_provider_redirect(request: Request) -> RedirectResponse:
     '''
-    Exchange GitHub OAuth code for tokens and create session.
-    Uses GithubAuthenticationService following Open-Closed Principle.
+    GET /auth/{provider} -- p07.md section 7: Local's login buttons no longer initiate provider
+    OAuth themselves, they just redirect to Cloud, which is the sole OAuth authority.
     '''
-    auth_service: GithubAuthenticationService = GithubAuthenticationService()
-    return await auth_service.login(request)
+    provider = request.path_params["provider"]
+    return RedirectResponse(url=f"{BROWSETERM_CLOUD_API_URL}/auth/{provider}/start?target=local", status_code=302)
 
 
-async def logout() -> Response:
+async def auth_callback(request: Request) -> Response:
     '''
-    Logout user by clearing session cookie and removing from Redis.
-    Uses GoogleAuthenticationService (can use any auth service for logout).
+    GET /auth/callback?code=<handoff> -- Cloud redirects the browser here after finishing OAuth
+    itself. Redeems the one-time handoff against Cloud (never touches provider tokens or Cloud's
+    Postgres/Redis directly) and establishes the local browser session.
     '''
-    auth_service: GoogleAuthenticationService = GoogleAuthenticationService()
-    return await auth_service.logout()
+    code = request.query_params.get("code")
+    if not code:
+        return RedirectResponse(
+            url="/login?auth_result=error&error_message=Missing+authentication+code", status_code=302
+        )
+    auth_service = AuthenticationService()
+    login_response = await auth_service.complete_login_from_handoff(code)
+    if login_response.status_code != 200:
+        return RedirectResponse(
+            url="/login?auth_result=error&error_message=Authentication+failed", status_code=302
+        )
+    redirect = RedirectResponse(url="/?auth_result=success", status_code=302)
+    for cookie_header in login_response.headers.getlist("set-cookie"):
+        redirect.headers.append("set-cookie", cookie_header)
+    return redirect
+
+
+async def logout(request: Request) -> Response:
+    '''
+    Logout user: revoke the session server-side (Cloud) and clear the session + CSRF cookies.
+    p07.md section 31 - the previous implementation only ever cleared the cookie, since this
+    handler never read the session cookie to pass along; fixed here.
+    '''
+    if not _csrf_ok(request):
+        return JSONResponse(content={"error": "Invalid CSRF token"}, status_code=403)
+    session_id = request.cookies.get("session")
+    auth_service = AuthenticationService()
+    return await auth_service.logout(session_id=session_id)
+
+
+@authenticate_session
+async def device_bootstrap(request: Request) -> JSONResponse:
+    '''
+    POST /device/bootstrap -- p07.md section 21: the smallest secure bridge from an already-
+    authenticated browser/WebView session to a native device credential. Desktop calls this
+    directly with the session cookie it already extracted from the WebView (see
+    browseterm-desktop's desktop/app.py), gets back a one-time bootstrap code, and immediately
+    redeems that against Cloud's public POST /auth/device-bootstrap/redeem - Desktop never uses
+    the session cookie itself as its ongoing device credential.
+    '''
+    if not _csrf_ok(request):
+        return JSONResponse(content={"error": "Invalid CSRF token"}, status_code=403)
+    user_id = request.state.user_info["id"]
+    try:
+        code = CloudClient().create_device_bootstrap(user_id)
+    except CloudClientError as e:
+        logger.error("device bootstrap start failed", extra={"error": e.message})
+        return JSONResponse(content={"error": "Could not start device bootstrap"}, status_code=502)
+    return JSONResponse(content={"code": code})
 
 
 async def echo(request: EchoRequestData) -> EchoResponseData:

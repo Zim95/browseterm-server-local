@@ -8,11 +8,7 @@ from fastapi import Request
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 
-from src.common.config import (
-    GOOGLE_CLIENT_ID, GOOGLE_AUTH_META_URL, GOOGLE_AUTH_SCOPE, GOOGLE_AUTH_REDIRECT_URI,
-    GITHUB_CLIENT_ID, GITHUB_AUTH_META_URL, GITHUB_AUTH_SCOPE, GITHUB_AUTH_REDIRECT_URI,
-    SOCKET_SSH_WSS_URL
-)
+from src.common.config import SOCKET_SSH_WSS_URL
 from src.authentication.authentication_helpers import authenticate_session
 from src.cloud_client.client import CloudClient
 from src.db_ops.image_db_ops import list_all_existing_images
@@ -198,36 +194,13 @@ async def profile(request: Request) -> HTMLResponse:
 async def login(request: Request) -> HTMLResponse:
     '''
     Login page template.
-    '''
-    return templates.TemplateResponse("login.html", {
-        "request": request,
-        "Google": {
-            "client_id": GOOGLE_CLIENT_ID,
-            "auth_meta_url": GOOGLE_AUTH_META_URL,
-            "auth_scope": GOOGLE_AUTH_SCOPE,
-            "auth_redirect_uri": GOOGLE_AUTH_REDIRECT_URI,
-        },
-        "Github": {
-            "client_id": GITHUB_CLIENT_ID,
-            "auth_meta_url": GITHUB_AUTH_META_URL,
-            "auth_scope": GITHUB_AUTH_SCOPE,
-            "auth_redirect_uri": GITHUB_AUTH_REDIRECT_URI,
-        }
-    })
 
-
-async def google_login_redirect(request: Request) -> HTMLResponse:
+    P07: the buttons on this page are now plain links to Local's own /auth/{provider}
+    (src/api_handlers.py:auth_provider_redirect), which redirects to Cloud - Local no longer
+    builds a provider OAuth URL itself (no client_id/scope/redirect_uri to pass to the template
+    any more; Cloud is the sole OAuth authority).
     '''
-    Google login redirect page template.
-    '''
-    return templates.TemplateResponse("google_login_redirect.html", {"request": request})
-
-
-async def github_login_redirect(request: Request) -> HTMLResponse:
-    '''
-    Github login redirect page template.
-    '''
-    return templates.TemplateResponse("github_login_redirect.html", {"request": request})
+    return templates.TemplateResponse("login.html", {"request": request})
 
 
 async def js_test(request: Request) -> HTMLResponse:

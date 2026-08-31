@@ -7,7 +7,6 @@ class TestRunner {
     constructor() {
         this.testFiles = [
             { name: 'test_base_class.js', displayName: 'Base Class Tests', suite: 'Base Class' },
-            { name: 'test_oauth_callback.js', displayName: 'OAuth Callback Tests', suite: 'OAuth Callback' },
             { name: 'test_login.js', displayName: 'Login Tests', suite: 'Login' },
             { name: 'test_profile.js', displayName: 'Profile Tests', suite: 'Profile' },
             { name: 'test_home.js', displayName: 'Home Tests', suite: 'Home' }
