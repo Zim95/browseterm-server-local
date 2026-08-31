@@ -2,7 +2,7 @@
 
 # Check if enough arguments are provided
 if [ $# -lt 22 ]; then
-    echo "Usage: $0 <namespace> <repo-name> <container-maker-host> <container-maker-port> <container-maker-certs-secret-name> <cert-manager-cron-job-name> <browseterm-cloud-api-url> <postgres-host> <postgres-port> <postgres-user> <postgres-password> <postgres-db> <socket-ssh-host> <socket-ssh-wss-url> <ingress-host> <cookie-secure> <cookie-samesite> <payment-gateway-host> <payment-gateway-port> <payment-gateway-certs-secret-name> <cloud-ingress-host> <cloud-ingress-host-ip>"
+    echo "Usage: $0 <namespace> <repo-name> <container-maker-host> <container-maker-port> <container-maker-certs-secret-name> <cert-manager-cron-job-name> <browseterm-cloud-api-url> <postgres-host> <postgres-port> <postgres-user> <postgres-password> <postgres-db> <socket-ssh-host> <socket-ssh-wss-url> <ingress-host> <cookie-secure> <cookie-samesite> <payment-gateway-host> <payment-gateway-port> <payment-gateway-certs-secret-name> <cloud-ingress-host> <cloud-ingress-host-ip> [expected-kube-context]"
     exit 1
 fi
 
@@ -34,6 +34,18 @@ PAYMENT_GATEWAY_CERTS_SECRET_NAME=${20}
 # reach Cloud instead of resolving back to itself. See SETUP-LOCAL.md.
 CLOUD_INGRESS_HOST=${21}
 CLOUD_INGRESS_HOST_IP=${22}
+# P23 (~/browseterm/p.md's "P23" section, plan section 22: "Every script checks kube context
+# before applying"): this project runs two separate k3d clusters (Cloud/Local) reachable from the
+# same host - applying against the wrong one is a real, previously-unguarded mistake class.
+# Optional (empty = no check) so this doesn't break an existing call site not yet passing it.
+EXPECTED_KUBE_CONTEXT=${23:-}
+if [ -n "$EXPECTED_KUBE_CONTEXT" ]; then
+    ACTUAL_KUBE_CONTEXT=$(kubectl config current-context)
+    if [ "$ACTUAL_KUBE_CONTEXT" != "$EXPECTED_KUBE_CONTEXT" ]; then
+        echo "ERROR: current kube context is '$ACTUAL_KUBE_CONTEXT', expected '$EXPECTED_KUBE_CONTEXT'. Aborting." >&2
+        exit 1
+    fi
+fi
 
 export NAMESPACE=$NAMESPACE
 export REPO_NAME=$REPO_NAME
