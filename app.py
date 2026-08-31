@@ -72,6 +72,7 @@ app.add_api_route(path="/js-test", endpoint=template_handlers.js_test, methods=[
 # must come first or it would be swallowed by {provider}="callback".
 app.add_api_route(path="/auth/callback", endpoint=api_handlers.auth_callback, methods=["GET"])
 app.add_api_route(path="/auth/{provider}", endpoint=api_handlers.auth_provider_redirect, methods=["GET"])
+app.add_api_route(path="/auth/refresh", endpoint=api_handlers.auth_refresh, methods=["POST"])
 app.add_api_route(path="/logout", endpoint=api_handlers.logout, methods=["POST"])
 app.add_api_route(path="/device/bootstrap", endpoint=api_handlers.device_bootstrap, methods=["POST"])
 

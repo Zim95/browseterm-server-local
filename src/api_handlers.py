@@ -77,6 +77,33 @@ async def auth_callback(request: Request) -> Response:
     return redirect
 
 
+async def auth_refresh(request: Request) -> JSONResponse:
+    '''
+    POST /auth/refresh -- the original plan's P07 scope explicitly included "session refresh"
+    as its own item (FINAL_BROWSETERM_V2_IMPLEMENTATION_PLAN.md), not just the incidental
+    extend-on-any-authenticated-call side effect `authenticate_session` already has. Needed for
+    long-lived pages (the terminal page, most importantly) where the user may not trigger any
+    other authenticated HTTP call for the whole 30-minute session window - they're just typing
+    over an already-established WebSocket to socket-ssh. Frontend JS polls this periodically
+    (see templates/static/js/base.js's session refresh heartbeat) to keep the session alive
+    without a full page navigation.
+
+    Deliberately does NOT use @authenticate_session - that redirects (302) to /login on an
+    invalid session, which is right for a page load but wrong for an XHR/fetch call (the browser
+    silently follows the redirect and hands the caller login-page HTML instead of a clean
+    signal). Returns plain JSON instead: 200 on success, 401 on a missing/invalid/expired
+    session, so the frontend can detect it and navigate to /login itself.
+    '''
+    session_id = request.cookies.get("session")
+    if not session_id:
+        return JSONResponse(content={"error": "Not authenticated"}, status_code=401)
+    auth_service = AuthenticationService()
+    validation = await auth_service.validate_session(session_id)
+    if not validation.get("is_valid"):
+        return JSONResponse(content={"error": "Session expired"}, status_code=401)
+    return JSONResponse(content={"status": "ok"}, status_code=200)
+
+
 async def logout(request: Request) -> Response:
     '''
     Logout user: revoke the session server-side (Cloud) and clear the session + CSRF cookies.

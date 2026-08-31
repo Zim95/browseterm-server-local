@@ -81,6 +81,24 @@ are still internal-token-gated (unchanged) - `validate`/`delete` are still calle
 (`authenticate_session`, `logout`); `create` is called only by Cloud itself now (from its own
 OAuth callback), never by this repo.
 
+**Follow-up (2026-08-31): session refresh + a real logout CSRF bug.** The original plan's P07
+scope also included "session refresh" as its own item, separate from "correct logout" - missed
+in the first pass, which only had the incidental extend-on-any-authenticated-call side effect
+`authenticate_session` already provides (insufficient for a long-lived page like the terminal
+page, where the user may go the whole 30-minute session window without triggering another
+authenticated HTTP call). Added `POST /auth/refresh` (`api_handlers.auth_refresh`, plain JSON
+200/401, deliberately not `@authenticate_session`-decorated so a `fetch()` gets a clean signal
+instead of silently following a 302 to `/login`) plus `templates/static/js/base.js`'s
+`SessionRefreshManager`, which polls it every 10 minutes on any post-login page and redirects to
+`/login` itself on a 401. While adding tests for this, found that `LogoutManager.handleLogout()`
+never actually sent the `X-CSRF-Token` header the P07 CSRF check requires - clicking Logout in
+the real UI 403'd on `/logout` (session never revoked) but still redirected to `/login`
+regardless, so it silently *looked* like it worked. Fixed alongside a new `BaseUtilities.
+getCookie()` helper. See `~/browseterm/p.md`'s P07 section for the full writeup and
+`tests/integration/authentication/test_api_handlers_auth.py` for the handler-level test coverage
+this gap revealed was missing (the first P07 pass only tested `AuthenticationService`'s own
+methods, never `api_handlers.py`'s routes - CSRF check included - at the handler level).
+
 ## `src/cloud_client/` - the Local -> Cloud boundary
 
 ```

@@ -37,6 +37,17 @@ class BaseUtilities {
     static isMobile() {
         return window.innerWidth <= 768;
     }
+
+    /**
+     * Read a cookie by name (P07's csrf_token cookie is deliberately not HttpOnly so this can
+     * read it - see src/authentication/authentication_service.py's module docstring).
+     * @param {string} name - Cookie name
+     * @returns {string|null} Cookie value or null
+     */
+    static getCookie(name) {
+        const match = document.cookie.match('(?:^|; )' + name + '=([^;]*)');
+        return match ? decodeURIComponent(match[1]) : null;
+    }
 }
 
 /**
@@ -259,11 +270,15 @@ class LogoutManager {
         console.log('User confirmed logout');
 
         try {
-            // Call logout endpoint to clear HTTP-only cookie
+            // Call logout endpoint to clear HTTP-only cookie and revoke the session server-side.
+            // P07's CSRF check (src/api_handlers.py:_csrf_ok) requires this header - without it
+            // the request 403s and the session survives, even though the UI still *looks* logged
+            // out once we redirect below (a real bug this fixes, not a hypothetical one).
             const response = await fetch('/logout', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
+                    'X-CSRF-Token': BaseUtilities.getCookie('csrf_token') || '',
                 }
             });
 
@@ -521,6 +536,58 @@ class UIAnimationManager {
 }
 
 /**
+ * SessionRefreshManager
+ *
+ * P07's original scope (FINAL_BROWSETERM_V2_IMPLEMENTATION_PLAN.md) included "session refresh"
+ * as its own item, not just the incidental extend-on-any-authenticated-call side effect Local's
+ * `authenticate_session` already has. Needed for long-lived pages (the terminal page especially)
+ * where the user may not trigger any other authenticated HTTP call for the whole 30-minute
+ * session window - they're just typing over an already-established WebSocket to socket-ssh.
+ * Polls POST /auth/refresh periodically to keep the session alive without a page navigation; a
+ * 401 means the session genuinely expired (or was revoked), so it redirects to /login itself
+ * rather than leaving the page silently unauthenticated.
+ */
+class SessionRefreshManager {
+    constructor(intervalMs = 10 * 60 * 1000) {
+        this.intervalMs = intervalMs;
+        this.timerId = null;
+    }
+
+    async refresh() {
+        try {
+            const response = await fetch('/auth/refresh', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': BaseUtilities.getCookie('csrf_token') || '',
+                }
+            });
+            if (response.status === 401) {
+                console.log('Session expired - redirecting to login');
+                window.location.href = '/login';
+            }
+        } catch (error) {
+            // Transient network failure - do NOT redirect on this alone, just try again next
+            // interval (matches the same "never log out on a network blip" principle used
+            // elsewhere in this project, e.g. browseterm-desktop's keepalive loop).
+            console.warn('Session refresh check failed (will retry):', error);
+        }
+    }
+
+    start() {
+        if (this.timerId) return;
+        this.timerId = setInterval(() => this.refresh(), this.intervalMs);
+    }
+
+    stop() {
+        if (this.timerId) {
+            clearInterval(this.timerId);
+            this.timerId = null;
+        }
+    }
+}
+
+/**
  * BaseApp
  * Main application controller that orchestrates all managers
  */
@@ -534,6 +601,7 @@ class BaseApp {
         this.darkModeManager = null;
         this.logoutManager = null;
         this.uiAnimationManager = null;
+        this.sessionRefreshManager = null;
     }
 
     /**
@@ -560,6 +628,14 @@ class BaseApp {
 
         this.uiAnimationManager = new UIAnimationManager();
         this.uiAnimationManager.initialize();
+
+        // Only on pages reached post-login (the csrf_token cookie is set at the same time as the
+        // HttpOnly session cookie - login.html has no sidebar/logout button and never gets here,
+        // but is included for completeness since base.js is shared across pages).
+        if (BaseUtilities.getCookie('csrf_token')) {
+            this.sessionRefreshManager = new SessionRefreshManager();
+            this.sessionRefreshManager.start();
+        }
 
         // Setup event listeners
         this.setupEventListeners(logoutBtn);
