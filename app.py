@@ -1,6 +1,4 @@
 # modules
-import asyncio
-from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 import uvicorn
@@ -11,21 +9,13 @@ configure_logging("browseterm-server")  # structured JSON logs to stdout (before
 
 import src.template_handlers as template_handlers
 import src.api_handlers as api_handlers
-from src.status_listener import status_listener_service
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Startup and shutdown events for the application."""
-    # Startup: Start the status listener service
-    loop = asyncio.get_event_loop()
-    status_listener_service.start(loop)
-    yield
-    # Shutdown: Stop the status listener service
-    status_listener_service.stop()
-
-
-app = FastAPI(lifespan=lifespan)
+# P10 (see ~/browseterm/p.md's "P10" section): the old status_listener_service (polling Cloud's
+# /containers API on an interval, since Local held no Postgres client to LISTEN/NOTIFY on
+# directly) and its /container-status-stream relay endpoint are removed - the browser now
+# connects directly to Cloud's own GET /events/stream, which owns the real Postgres NOTIFY
+# connection. No lifespan/background task is needed here any more.
+app = FastAPI()
 
 
 class RevalidateStaticFiles(StaticFiles):
@@ -87,9 +77,6 @@ app.add_api_route(path="/delete-container-in-k8s", endpoint=api_handlers.delete_
 app.add_api_route(path="/save-container", endpoint=api_handlers.save_container, methods=["POST"])
 app.add_api_route(path="/resume-container", endpoint=api_handlers.resume_container, methods=["POST"])
 app.add_api_route(path="/container-activity", endpoint=api_handlers.container_activity, methods=["POST"])
-
-# SSE endpoints for real-time updates
-app.add_api_route(path="/container-status-stream", endpoint=api_handlers.container_status_sse, methods=["GET"])
 
 
 if __name__ == "__main__":

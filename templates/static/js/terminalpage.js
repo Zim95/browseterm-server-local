@@ -448,13 +448,15 @@ class TerminalPageHandler {
     /**
      * Subscribe to server-sent save-status events for this container and stop the
      * spinner when the snapshot finishes (Succeeded/Failed).
+     *
+     * P10: connects directly to Cloud's GET /events/stream via a query-string sseToken - see
+     * terminals.js's setupStatusStream for the full rationale (no user_id in this URL at all).
      */
     setupSaveStatusStream() {
-        const userInfo = window.userInfo || {};
-        if (!userInfo.id) return;
+        if (!window.sseToken || !window.cloudApiUrl) return;
         const containerId = String(this.terminalInfo.id);
 
-        const es = new EventSource(`/container-status-stream?user_id=${userInfo.id}`);
+        const es = new EventSource(`${window.cloudApiUrl}/events/stream?token=${window.sseToken}`);
         es.onmessage = (event) => {
             let data;
             try { data = JSON.parse(event.data); } catch (e) { return; }

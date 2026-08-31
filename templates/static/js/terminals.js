@@ -576,19 +576,32 @@ class TerminalsHandler {
     }
 
     /**
-     * Setup SSE connection for real-time container status updates
+     * Setup SSE connection for real-time container status updates.
+     *
+     * P10 (see ~/browseterm/p.md's "P10" section): connects directly to Cloud's own
+     * GET /events/stream, not to a Local-hosted relay - Local no longer polls or relays this at
+     * all. Authenticated via a query-string sseToken (EventSource can't set custom headers);
+     * there is no user_id in this URL at all - Cloud resolves the subscribing user from the
+     * token's underlying session server-side, never from anything the client supplies.
      */
     setupStatusStream() {
-        const userInfo = TerminalsUtilities.getUserInfo();
-        if (!userInfo.id) {
-            console.log('No user ID available, skipping SSE setup');
+        if (!window.sseToken || !window.cloudApiUrl) {
+            console.log('No SSE token/Cloud URL available, skipping SSE setup');
             return;
         }
 
-        const eventSource = new EventSource(`/container-status-stream?user_id=${userInfo.id}`);
+        let hasConnectedBefore = false;
+        const eventSource = new EventSource(`${window.cloudApiUrl}/events/stream?token=${window.sseToken}`);
 
         eventSource.onopen = () => {
             console.log('SSE connection established for status updates');
+            if (hasConnectedBefore) {
+                // Reconnect after a drop - a status/save_status change could have happened while
+                // disconnected. Per the plan's explicit P10 instruction: refetch full state to
+                // repair missed events, don't try to replay them.
+                this.loadTerminals();
+            }
+            hasConnectedBefore = true;
         };
 
         eventSource.onmessage = (event) => {

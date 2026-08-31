@@ -37,7 +37,7 @@ Every former direct-DB path has been migrated:
 |---|---|
 | `src/authentication/authentication_helpers.py` (session validate/delete) | `CloudClient.validate_session`/`delete_session` -> Cloud `POST /auth/sessions/validate`/`delete` |
 | `src/template_handlers.py`'s one-time WebSocket token | `CloudClient.create_websocket_token` -> Cloud `POST /auth/websocket-tokens` |
-| `src/status_listener.py` (was Postgres LISTEN/NOTIFY) | polls `CloudClient.list_containers` on an interval and diffs against the last-seen snapshot per user (see that module's docstring - real push-based delivery is P10's job, this is a documented interim simplification) |
+| `src/status_listener.py` (was Postgres LISTEN/NOTIFY, then an interim polling relay) | **removed entirely as of P10** - the browser now connects directly to Cloud's own `GET /events/stream`, authenticated by an sse_token from `CloudClient.create_sse_token` -> Cloud `POST /auth/sse-tokens`. See `browseterm-server`'s README for the Cloud-side half. |
 | `src/db_ops/container_db_ops.py`, `image_db_ops.py`, `subscription_db_ops.py` (container/image/subscription CRUD) | `CloudClient.create_container`/`get_container`/`list_containers`/`update_container`/`delete_container`/`list_images`/`list_subscription_types`/`get_current_subscription` |
 
 `session_manager.py` and `db_ops/user_db_ops.py` were deleted outright (their only caller,
@@ -277,7 +277,7 @@ npm test
 ```
 
 ## Backend integration tests (unittest)
-These are integration tests under `tests/integration/` (e.g. `containers/`, `authentication/`, `status_listener/`). They are NOT standalone unit tests: they require live dependencies (Postgres, Redis, and in some cases the running services / cluster) to be up before running them.
+These are integration tests under `tests/integration/` (e.g. `containers/`, `authentication/`). They are NOT standalone unit tests: they require live dependencies (Postgres, Redis, and in some cases the running services / cluster) to be up before running them.
 ```
 poetry install
 poetry run python -m unittest discover -s tests/integration -p "test_*.py"

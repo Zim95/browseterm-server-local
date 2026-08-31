@@ -6,9 +6,7 @@ Their job is to parse request data, call some class and return response data.
 import asyncio
 from datetime import datetime, timezone
 from fastapi import Request, HTTPException
-from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
-import json
-from typing import AsyncGenerator
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from src.containers.containers_service import ContainerService
 from src.data_models.containers import CreateContainerDBRequest, CreateContainerK8SRequest, GetContainerRequest, ResourceLimits, UpdateContainerRequest, UpdateContainerFilters, UpdateContainerData, ListUserContainersRequest, DeleteContainerDBRequest, DeleteContainerK8SRequest, SaveContainerK8SRequest
@@ -28,10 +26,6 @@ from src.db_ops.dto.subscription_dto import GetUserSubscriptionPlanModel
 from kubernetes.utils.quantity import parse_quantity
 
 logger = get_logger("api_handlers")
-
-
-# dtos
-from src.status_listener import status_listener_service
 
 
 def _csrf_ok(request: Request) -> bool:
@@ -709,50 +703,3 @@ async def container_activity(request: Request) -> JSONResponse:
         return JSONResponse(content={'status': 'ok'}, status_code=200)
     except Exception as e:
         return JSONResponse(content={'error': f"Error recording activity: {str(e)}"}, status_code=500)
-
-
-@authenticate_session
-async def container_status_sse(request: Request) -> StreamingResponse:
-    """
-    SSE endpoint for container status updates.
-    Clients connect and receive real-time status changes for their containers.
-
-    Subscribes to the authenticated caller's own status stream. Never trust a client-supplied
-    user_id (query param) here -- it would let a caller subscribe to (and observe container
-    names, ip addresses, kubernetes ids, save/hibernate/resume/status transitions for) any other
-    user's private status stream just by supplying their user_id.
-    """
-    user_id = request.state.user_info['id']
-
-    async def event_generator() -> AsyncGenerator[str, None]:
-        """Generate SSE events from the status listener queue."""
-        queue = status_listener_service.subscribe(user_id)
-        try:
-            # Send initial connection message
-            yield f"data: {json.dumps({'type': 'connected', 'user_id': user_id})}\n\n"
-
-            while True:
-                # Check if client disconnected
-                if await request.is_disconnected():
-                    break
-
-                try:
-                    # Wait for message with timeout (for keepalive)
-                    message = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    yield f"data: {json.dumps(message)}\n\n"
-                except asyncio.TimeoutError:
-                    # Send keepalive ping
-                    yield f": keepalive\n\n"
-
-        finally:
-            status_listener_service.unsubscribe(user_id, queue)
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"  # Disable nginx buffering
-        }
-    )

@@ -114,6 +114,12 @@ class CloudClient:
         by socket-ssh."""
         return self._request("POST", "/auth/websocket-tokens", json_body={"session_id": session_id})["token"]
 
+    def create_sse_token(self, session_id: str) -> str:
+        """POST /auth/sse-tokens (P10). NOT single-use, unlike create_websocket_token - the
+        browser's EventSource presents the same token again on every automatic reconnect. Used to
+        authenticate the browser's direct connection to Cloud's GET /events/stream."""
+        return self._request("POST", "/auth/sse-tokens", json_body={"session_id": session_id})["token"]
+
     # ---- OAuth handoff (P07) - public but possession-gated, no internal token needed ----
 
     def redeem_handoff(self, code: str) -> dict:

@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 from src.common.config import SOCKET_SSH_WSS_URL
 from src.authentication.authentication_helpers import authenticate_session
 from src.cloud_client.client import CloudClient
+from src.cloud_client.config import BROWSETERM_CLOUD_API_URL
 from src.db_ops.image_db_ops import list_all_existing_images
 from src.db_ops.subscription_db_ops import list_all_existing_subscription_types
 from src.db_ops.container_db_ops import get_container
@@ -38,6 +39,11 @@ async def terminals(request: Request) -> HTMLResponse:
     '''
     subscriptions: list = await list_all_existing_subscription_types()
     images: list = await list_all_existing_images()
+    # P10: one-time-ish SSE token (see ~/browseterm/p.md's "P10" section) so the browser can
+    # connect directly to Cloud's GET /events/stream for real-time container status updates -
+    # Local no longer relays/polls for this itself.
+    session_id = request.cookies.get('session')
+    sse_token = CloudClient().create_sse_token(session_id) if session_id else ''
     return templates.TemplateResponse(
         "terminals.html",
         {
@@ -45,7 +51,9 @@ async def terminals(request: Request) -> HTMLResponse:
             "subscriptions": subscriptions,
             "images": images,
             "userInfo": request.state.user_info,
-            "currentSubscriptionPlan": request.state.current_subscription_plan
+            "currentSubscriptionPlan": request.state.current_subscription_plan,
+            "sseToken": sse_token,
+            "cloudApiUrl": BROWSETERM_CLOUD_API_URL,
         }
     )
 
@@ -121,6 +129,8 @@ async def terminalpage(request: Request) -> HTMLResponse:
     # Generate one-time WebSocket token for this session (via Cloud - no direct Redis access)
     session_id = request.cookies.get('session')
     ws_token = CloudClient().create_websocket_token(session_id) if session_id else ''
+    # P10: SSE token for the browser's direct connection to Cloud's GET /events/stream.
+    sse_token = CloudClient().create_sse_token(session_id) if session_id else ''
     return templates.TemplateResponse(
         "terminalpage.html",
         {
@@ -128,6 +138,8 @@ async def terminalpage(request: Request) -> HTMLResponse:
             "terminalInfo": terminal_info,
             "socketSSHUrl": SOCKET_SSH_WSS_URL,
             "wsToken": ws_token,
+            "sseToken": sse_token,
+            "cloudApiUrl": BROWSETERM_CLOUD_API_URL,
             "userInfo": request.state.user_info
         }
     )

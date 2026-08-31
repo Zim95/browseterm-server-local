@@ -313,23 +313,10 @@ class TestContainerActivityCrossUser(TestCase):
         self.assertEqual((called_container_id, called_user_id), ('b-container', USER_A))
 
 
-class TestContainerStatusSseOwnership(TestCase):
-    '''GET /container-status-stream: must subscribe to the session's own user_id, never a
-    client-supplied query param.'''
-
-    def test_subscribes_to_session_user_not_query_param(self) -> None:
-        request = _mock_request(query_params={'user_id': USER_B}, user_id=USER_A)
-        queue = asyncio.Queue()
-        mock_listener = MagicMock()
-        mock_listener.subscribe = MagicMock(return_value=queue)
-        mock_listener.unsubscribe = MagicMock()
-        with patch('src.api_handlers.status_listener_service', mock_listener):
-            response = asyncio.run(api_handlers.container_status_sse.__wrapped__(request=request))
-
-            async def _first_event() -> str:
-                return await response.body_iterator.__anext__()
-
-            first_event = asyncio.run(_first_event())
-        mock_listener.subscribe.assert_called_once_with(USER_A)
-        self.assertIn(USER_A, first_event)
-        self.assertNotIn(USER_B, first_event)
+# P10 (see ~/browseterm/p.md's "P10" section): GET /container-status-stream and
+# status_listener_service are removed entirely - Local no longer relays or polls for container
+# status at all, the browser connects directly to Cloud's own GET /events/stream. The equivalent
+# "never trust a client-supplied user_id" ownership guarantee is now covered by
+# browseterm-server's tests/integration/cloud/test_sse_handlers.py, which proves the subscribing
+# user_id is resolved only from the validated session behind the sse_token, with no user_id
+# accepted from the request at all.
