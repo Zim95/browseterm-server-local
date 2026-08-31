@@ -177,6 +177,20 @@ class CloudClient:
                 return False
             raise
 
+    def resume_container(self, container_id: str, user_id: str) -> dict:
+        """POST /containers/{container_id}/resume (P19). device_id is deliberately omitted -
+        Cloud auto-resolves the caller's currently-ACTIVE device, same pattern create_container
+        already uses (P13) - Local has no established way to know a device_id of its own either.
+        Raises CloudClientError (409 if the container isn't currently HIBERNATED or another
+        request won a concurrent resume race, 400 if the resolved device lacks capacity)."""
+        return self._request("POST", f"/containers/{container_id}/resume", json_body={"user_id": user_id})["container"]
+
+    def hibernate_container(self, container_id: str) -> None:
+        """POST /internal/containers/{container_id}/hibernate (P18). No user_id needed - this is
+        the same trusted-SYSTEM-caller route the reaper uses; Local reuses it as-is for P19's
+        resume rollback-on-failure path (see api_handlers.resume_container)."""
+        self._request("POST", f"/internal/containers/{container_id}/hibernate", json_body={})
+
     # ---- Catalog / subscription API - internal-service auth ----
 
     def list_images(self) -> list[dict]:

@@ -113,6 +113,39 @@ getCookie()` helper. See `~/browseterm/p.md`'s P07 section for the full writeup 
 this gap revealed was missing (the first P07 pass only tested `AuthenticationService`'s own
 methods, never `api_handlers.py`'s routes - CSRF check included - at the handler level).
 
+## P19 - cross-device resume
+
+`POST /resume-container` (`src/api_handlers.py:resume_container`) previously flipped a HIBERNATED
+container to RESUMING itself via `update_container_fields` before recreating its pod. As of P19,
+that transition moved to Cloud: after this repo's own entitlement gates (concurrent-container
+limit, spec-still-fits-current-plan - both unchanged, still fail-open on a subscription-lookup
+error), the handler calls the new `CloudClient.resume_container(container_id, user_id)` ->
+Cloud's `POST /containers/{id}/resume`. `device_id` is deliberately omitted - Cloud auto-resolves
+the caller's currently-ACTIVE device, the same pattern `create_container` already uses (P13) -
+this repo has no established way to know a device_id of its own either. Cloud validates the
+container is actually HIBERNATED, reserves the resolved device's capacity, and atomically sets
+`device_id`/`status=RESUMING`, all before this repo attempts any pod-start (see
+`browseterm-server`'s README's P19 section for the Cloud-side CAS/reservation detail). A non-2xx
+`CloudClientError` here (409 - not hibernated / lost a concurrent resume race, 400 - resolved
+device lacks capacity) means nothing was reserved on Cloud's side, so it's surfaced to the caller
+verbatim and k8s is never touched.
+
+If the pod-start step (`ContainerService.create_container_in_k8s`) fails **after** Cloud's resume
+transition already succeeded, the handler rolls that back by calling
+`CloudClient.hibernate_container(container_id)` - reusing the existing P18 internal hibernate
+endpoint as-is (it already clears `device_id`, releases the reservation, and sets HIBERNATED)
+rather than building a dedicated "cancel resume" endpoint or just marking the row FAILED, which
+would leave the device's reservation dangling forever. This rollback only fires once Cloud's
+transition is confirmed to have succeeded (tracked via a local `resumed` flag) - a pod-start
+failure that happens because Cloud rejected the resume in the first place still falls back to the
+old `status=FAILED` marking, since there is nothing on Cloud's side to unwind. See
+`~/browseterm/p.md`'s P19 section for the full design writeup, including the live end-to-end
+verification performed against Cloud's resume/hibernate endpoints directly (create device +
+container -> hibernate -> resume with an explicit `device_id` -> confirmed `status`/`device_id`/
+`used_cpu` transitioned correctly -> a second resume attempt on the same container correctly
+409'd with no double-reservation -> a simulated rollback via hibernate confirmed `device_id`
+cleared and `used_cpu` returned to 0).
+
 ## `src/cloud_client/` - the Local -> Cloud boundary
 
 ```

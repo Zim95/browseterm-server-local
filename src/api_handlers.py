@@ -584,6 +584,7 @@ async def resume_container(request: Request) -> JSONResponse:
     '''
     container_id = None
     user_id = None
+    resumed = False  # P19: whether Cloud's resume transition succeeded - gates rollback below
     try:
         request_data: dict = await request.json()
         container_id = request_data['container_id']
@@ -638,10 +639,24 @@ async def resume_container(request: Request) -> JSONResponse:
         except Exception:
             logger.error("entitlement check failed, allowing resume", extra={"container_id": container_id}, exc_info=True)
 
-        # mark RESUMING so the UI can show progress
-        await update_container_fields(
-            container_id, user_id, {"status": ContainerStatus.RESUMING, "last_request_id": request_id_var.get()}
-        )
+        # P19 (see ~/browseterm/p.md's "P19" section): Cloud validates the container is actually
+        # HIBERNATED, resolves/validates the resuming device (this Mac's currently-active one -
+        # Local has no device_id of its own, same as create_container/P13), reserves that
+        # device's capacity, and atomically transitions device_id/status=RESUMING - all before
+        # any pod-start attempt below. A non-2xx response here means resume never actually
+        # started (nothing was reserved), so it's safe to just surface the error.
+        try:
+            await asyncio.to_thread(CloudClient().resume_container, container_id, user_id)
+        except CloudClientError as e:
+            logger.warning(
+                "resume rejected by Cloud", extra={"container_id": container_id, "status_code": e.status_code, "error": e.message},
+            )
+            return JSONResponse(content={'error': e.message}, status_code=e.status_code if e.status_code else 500)
+        resumed = True  # tracks whether the except-block below must roll this reservation back
+        # last_request_id stamped separately (Cloud's resume transition itself only touches
+        # device_id/status) - preserves the pre-P19 behavior of tracing a resume attempt from its
+        # very start, in case the pod-start step below never reaches its own final update.
+        await update_container_fields(container_id, user_id, {"last_request_id": request_id_var.get()})
 
         # No DB credentials in the user pod (same as create): status is written by the central
         # status_monitor, not an in-pod sidecar. CONTAINER_ID rides only so container-maker can stamp
@@ -694,7 +709,17 @@ async def resume_container(request: Request) -> JSONResponse:
         return JSONResponse(content={'error': e.detail}, status_code=e.status_code)
     except Exception as e:
         logger.error("resume failed", extra={"container_id": container_id}, exc_info=True)
-        if container_id and user_id:
+        if container_id and resumed:
+            # P19: Cloud's resume transition already reserved a device's capacity and set
+            # device_id/RESUMING before the pod-start step above failed - the existing P18
+            # hibernate endpoint already does exactly the right rollback (clears device_id,
+            # releases the reservation, sets HIBERNATED), so it's reused as-is rather than just
+            # marking FAILED, which would leave a dangling device reservation forever.
+            try:
+                await asyncio.to_thread(CloudClient().hibernate_container, container_id)
+            except Exception:
+                logger.error("resume rollback (hibernate) also failed", extra={"container_id": container_id}, exc_info=True)
+        elif container_id and user_id:
             try:
                 await update_container_fields(container_id, user_id, {"status": ContainerStatus.FAILED})
             except Exception:

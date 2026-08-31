@@ -17,13 +17,16 @@ import src.api_handlers as api_handlers
 from src.containers.dto.container_response_dto import ContainerResponseModel
 
 
-def _mock_request(body: dict) -> MagicMock:
+def _mock_request(body: dict, user_id: str = 'user-42') -> MagicMock:
     '''
     A FastAPI Request stand-in whose .json() coroutine returns `body`, mirroring how
-    api_handlers reads request data (await request.json()).
+    api_handlers reads request data (await request.json()). request.state.user_info['id'] is
+    set explicitly (resume_container subscripts it) rather than left as an unconfigured
+    MagicMock, since P19's Cloud calls now assert the exact user_id they were invoked with.
     '''
     request: MagicMock = MagicMock(spec=Request)
     request.json = AsyncMock(return_value=body)
+    request.state.user_info = {'id': user_id}
     return request
 
 
@@ -71,17 +74,22 @@ class TestResumeContainer(TestCase):
             associated_resources=[{'kind': 'Service', 'name': 'new-svc'}],
         )
 
-    def _run_resume(self, body: dict):
-        mock_service: MagicMock = MagicMock()
-        mock_service.create_container_in_k8s = AsyncMock(return_value=self.response)
+    def _run_resume(self, body: dict, mock_cloud_client: MagicMock = None, mock_service: MagicMock = None):
+        if mock_service is None:
+            mock_service = MagicMock()
+            mock_service.create_container_in_k8s = AsyncMock(return_value=self.response)
+        if mock_cloud_client is None:
+            mock_cloud_client = MagicMock()
+            mock_cloud_client.resume_container.return_value = {**self.row, 'status': 'Resuming'}
 
         with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=self.row)), \
              patch('src.api_handlers.update_container_fields', AsyncMock()) as mock_update, \
-             patch('src.api_handlers.ContainerService', return_value=mock_service):
+             patch('src.api_handlers.ContainerService', return_value=mock_service), \
+             patch('src.api_handlers.CloudClient', return_value=mock_cloud_client):
             result = asyncio.run(
                 api_handlers.resume_container.__wrapped__(request=_mock_request(body))
             )
-        return result, mock_update, mock_service
+        return result, mock_update, mock_service, mock_cloud_client
 
     def _final_update_data(self, mock_update: MagicMock) -> dict:
         '''The fields dict of the update_container_fields call that set status=RUNNING (the
@@ -94,7 +102,7 @@ class TestResumeContainer(TestCase):
 
     def test_resume_recreates_pod_from_saved_image(self) -> None:
         '''A HIBERNATED container with a saved_image is recreated FROM that snapshot.'''
-        result, _update, mock_service = self._run_resume({'container_id': self.container_id})
+        result, _update, mock_service, _cloud = self._run_resume({'container_id': self.container_id})
         self.assertEqual(result.status_code, 200)
         mock_service.create_container_in_k8s.assert_called_once()
         self.assertEqual(
@@ -108,7 +116,7 @@ class TestResumeContainer(TestCase):
         the NEW ip_address + kubernetes_id and status RUNNING. The bug was ip_address not
         being updated, leaving the terminal dialing the deleted pod's IP (SSH handshake timeout).
         '''
-        _result, mock_update, _service = self._run_resume({'container_id': self.container_id})
+        _result, mock_update, _service, _cloud = self._run_resume({'container_id': self.container_id})
         data = self._final_update_data(mock_update)
         self.assertEqual(data['ip_address'], self.response.container_ip)   # 10.0.0.99, not 10.0.0.5
         self.assertNotEqual(data['ip_address'], self.row['ip_address'])
@@ -116,13 +124,30 @@ class TestResumeContainer(TestCase):
         self.assertEqual(data['associated_resources'], self.response.associated_resources)
         self.assertEqual(data['status'], ContainerStatus.RUNNING)
 
-    def test_resume_marks_resuming_before_recreate(self) -> None:
-        '''The row flips to RESUMING before the (slow) recreate so the UI can show progress.'''
-        _result, mock_update, _service = self._run_resume({'container_id': self.container_id})
-        statuses = [c.args[2].get('status') for c in mock_update.call_args_list]
-        self.assertIn(ContainerStatus.RESUMING, statuses)
-        self.assertLess(statuses.index(ContainerStatus.RESUMING),
-                        statuses.index(ContainerStatus.RUNNING))
+    def test_resume_calls_cloud_before_recreate(self) -> None:
+        '''P19: the row flips to RESUMING (via Cloud's own resume transition) before the (slow)
+        pod recreate, so the UI can show progress and a failed pod-start has something to roll
+        back. Cloud's resume_container is called with (container_id, user_id) before
+        ContainerService.create_container_in_k8s.'''
+        manager = MagicMock()
+        mock_cloud_client = MagicMock()
+        mock_cloud_client.resume_container.return_value = {**self.row, 'status': 'Resuming'}
+        manager.attach_mock(mock_cloud_client.resume_container, 'resume_container')
+
+        mock_service = MagicMock()
+        mock_service.create_container_in_k8s = AsyncMock(return_value=self.response)
+        manager.attach_mock(mock_service.create_container_in_k8s, 'create_container_in_k8s')
+
+        result, _update, _service, cloud = self._run_resume(
+            {'container_id': self.container_id}, mock_cloud_client=mock_cloud_client, mock_service=mock_service
+        )
+        self.assertEqual(result.status_code, 200)
+        cloud.resume_container.assert_called_once_with(self.container_id, 'user-42')
+        call_names = [c[0] for c in manager.mock_calls]
+        self.assertLess(
+            call_names.index('resume_container'), call_names.index('create_container_in_k8s'),
+            'Cloud resume_container must be called before the pod-start step',
+        )
 
     def test_resume_missing_container_returns_404(self) -> None:
         '''No row -> 404, and k8s is never touched.'''
@@ -144,13 +169,52 @@ class TestResumeContainer(TestCase):
         is kubelet-driven and lives in container-maker, not here.
         '''
         self.row['status'] = ContainerStatus.UNKNOWN.value
-        result, mock_update, mock_service = self._run_resume({'container_id': self.container_id})
+        result, mock_update, mock_service, _cloud = self._run_resume({'container_id': self.container_id})
         self.assertEqual(result.status_code, 200)
         self.assertEqual(
             mock_service.create_container_in_k8s.call_args.kwargs['image_name_override'],
             self.saved_image,
         )
         self.assertEqual(self._final_update_data(mock_update)['status'], ContainerStatus.RUNNING)
+
+    def test_resume_rejected_by_cloud_surfaces_error_before_k8s(self) -> None:
+        '''P19: if Cloud rejects the resume transition (e.g. 409 - lost a concurrent resume
+        race, or 400 - resolved device lacks capacity), nothing was reserved on Cloud's side, so
+        Local must surface that status/error verbatim and never touch k8s.'''
+        from src.cloud_client.client import CloudClientError
+        mock_cloud_client = MagicMock()
+        mock_cloud_client.resume_container.side_effect = CloudClientError(409, 'Container is not hibernated')
+        result, _update, mock_service, _cloud = self._run_resume(
+            {'container_id': self.container_id}, mock_cloud_client=mock_cloud_client
+        )
+        self.assertEqual(result.status_code, 409)
+        self.assertIn('Container is not hibernated', result.body.decode())
+        mock_service.create_container_in_k8s.assert_not_called()
+
+    def test_resume_pod_start_failure_rolls_back_via_hibernate(self) -> None:
+        '''P19: once Cloud's resume transition succeeded (reserved capacity, set
+        device_id/RESUMING), a subsequent pod-start failure must roll that back via the existing
+        hibernate endpoint (resumed=True path) rather than just marking FAILED, which would leave
+        a dangling device reservation forever.'''
+        mock_service: MagicMock = MagicMock()
+        mock_service.create_container_in_k8s = AsyncMock(side_effect=RuntimeError('pod start boom'))
+        mock_cloud_client = MagicMock()
+        mock_cloud_client.resume_container.return_value = {**self.row, 'status': 'Resuming'}
+
+        with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=self.row)), \
+             patch('src.api_handlers.update_container_fields', AsyncMock()) as mock_update, \
+             patch('src.api_handlers.ContainerService', return_value=mock_service), \
+             patch('src.api_handlers.CloudClient', return_value=mock_cloud_client):
+            result = asyncio.run(
+                api_handlers.resume_container.__wrapped__(
+                    request=_mock_request({'container_id': self.container_id})
+                )
+            )
+        self.assertEqual(result.status_code, 500)
+        mock_cloud_client.hibernate_container.assert_called_once_with(self.container_id)
+        # never falls back to the old FAILED-marking behavior once Cloud's transition succeeded
+        statuses = [c.args[2].get('status') for c in mock_update.call_args_list]
+        self.assertNotIn(ContainerStatus.FAILED, statuses)
 
 
 class TestCountActiveContainers(TestCase):
@@ -274,11 +338,14 @@ class TestResumeEntitlementChecks(TestCase):
             container_name='my-container', container_id='new-pod-uid', container_ip='10.0.0.99',
             container_network='user-42-namespace', container_ports=[], associated_resources=[],
         ))
+        mock_cloud_client = MagicMock()
+        mock_cloud_client.resume_container.return_value = {**self.row, 'status': 'Resuming'}
 
         with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=self.row)), \
              patch('src.api_handlers.update_container_fields', AsyncMock()), \
              patch('src.api_handlers.list_user_containers_db', AsyncMock(return_value=active_rows)), \
              patch('src.api_handlers.ContainerService', return_value=mock_service), \
+             patch('src.api_handlers.CloudClient', return_value=mock_cloud_client), \
              patch('src.api_handlers.get_user_current_subscription_plan', AsyncMock(return_value=plan)):
             result = asyncio.run(
                 api_handlers.resume_container.__wrapped__(request=_mock_request({'container_id': self.container_id}))
