@@ -57,6 +57,44 @@ class TestAuthProviderRedirect(unittest.TestCase):
         self.assertEqual(result.status_code, 302)
         self.assertIn("/auth/google/start?target=local", result.headers["location"])
 
+    def test_no_desktop_cookie_set_for_a_plain_browser_login(self):
+        '''Cloud never learns about desktop mode either way - the redirect target stays
+        target=local regardless.'''
+        request = _mock_request()
+        request.path_params = {"provider": "google"}
+        result = _run(api_handlers.auth_provider_redirect(request))
+        self.assertIn("/auth/google/start?target=local", result.headers["location"])
+        self.assertEqual(result.headers.getlist("set-cookie"), [])
+
+    def test_desktop_target_with_valid_port_sets_short_lived_cookie(self):
+        request = _mock_request(query_params={"target": "desktop", "desktop_port": "54321"})
+        request.path_params = {"provider": "google"}
+        result = _run(api_handlers.auth_provider_redirect(request))
+        self.assertIn("/auth/google/start?target=local", result.headers["location"])
+        set_cookie = " ".join(result.headers.getlist("set-cookie"))
+        self.assertIn("desktop_login_port=54321", set_cookie)
+        self.assertIn("Max-Age=300", set_cookie)
+
+    def test_desktop_target_without_a_port_sets_no_cookie(self):
+        request = _mock_request(query_params={"target": "desktop"})
+        request.path_params = {"provider": "google"}
+        result = _run(api_handlers.auth_provider_redirect(request))
+        self.assertEqual(result.headers.getlist("set-cookie"), [])
+
+    def test_desktop_target_with_a_non_numeric_port_sets_no_cookie(self):
+        '''The port is the only thing that ends up in the eventual 127.0.0.1 redirect URL - must
+        be strictly validated, not passed through.'''
+        request = _mock_request(query_params={"target": "desktop", "desktop_port": "not-a-port; evil"})
+        request.path_params = {"provider": "google"}
+        result = _run(api_handlers.auth_provider_redirect(request))
+        self.assertEqual(result.headers.getlist("set-cookie"), [])
+
+    def test_desktop_target_with_out_of_range_port_sets_no_cookie(self):
+        request = _mock_request(query_params={"target": "desktop", "desktop_port": "99999"})
+        request.path_params = {"provider": "google"}
+        result = _run(api_handlers.auth_provider_redirect(request))
+        self.assertEqual(result.headers.getlist("set-cookie"), [])
+
 
 class TestAuthCallback(unittest.TestCase):
     def test_missing_code_redirects_to_login_with_error(self):
@@ -93,6 +131,77 @@ class TestAuthCallback(unittest.TestCase):
         set_cookie_headers = " ".join(result.headers.getlist("set-cookie"))
         self.assertIn("session=s1", set_cookie_headers)
         self.assertIn(f"csrf_token={CSRF_TOKEN}", set_cookie_headers)
+
+    def _login_response(self, user_id: str = "u1") -> Response:
+        body = json.dumps({
+            "session_id": "s1",
+            "user_info": {"id": user_id},
+            "subscription_info": {},
+            "current_subscription_plan": {},
+        })
+        login_response = Response(content=body, media_type="application/json", status_code=200)
+        login_response.set_cookie(key="session", value="s1", httponly=True)
+        login_response.set_cookie(key="csrf_token", value=CSRF_TOKEN, httponly=False)
+        return login_response
+
+    @patch("src.api_handlers.CloudClient")
+    @patch("src.api_handlers.AuthenticationService")
+    def test_desktop_login_port_cookie_redirects_to_loopback_with_bootstrap_code(
+        self, mock_service_cls, mock_client_cls
+    ):
+        mock_service = MagicMock()
+        mock_service.complete_login_from_handoff = AsyncMock(return_value=self._login_response(user_id="u1"))
+        mock_service_cls.return_value = mock_service
+        mock_client = MagicMock()
+        mock_client.create_device_bootstrap.return_value = "bootstrap-code-1"
+        mock_client_cls.return_value = mock_client
+
+        request = _mock_request(
+            query_params={"code": "good-code"}, cookies={"desktop_login_port": "54321"}
+        )
+        result = _run(api_handlers.auth_callback(request))
+        self.assertEqual(result.status_code, 302)
+        self.assertEqual(result.headers["location"], "http://127.0.0.1:54321/callback?code=bootstrap-code-1")
+        mock_client.create_device_bootstrap.assert_called_once_with("u1")
+        # one-shot: the cookie must be cleared regardless of outcome
+        set_cookie_headers = " ".join(result.headers.getlist("set-cookie"))
+        self.assertIn("desktop_login_port=", set_cookie_headers)
+        self.assertIn('Max-Age=0', set_cookie_headers)
+        # the real Local session cookies are still forwarded (browser stays logged in on Local too)
+        self.assertIn("session=s1", set_cookie_headers)
+
+    @patch("src.api_handlers.CloudClient")
+    @patch("src.api_handlers.AuthenticationService")
+    def test_desktop_bootstrap_failure_redirects_to_login_with_error(self, mock_service_cls, mock_client_cls):
+        from src.cloud_client.client import CloudClientError
+
+        mock_service = MagicMock()
+        mock_service.complete_login_from_handoff = AsyncMock(return_value=self._login_response())
+        mock_service_cls.return_value = mock_service
+        mock_client = MagicMock()
+        mock_client.create_device_bootstrap.side_effect = CloudClientError(502, "boom")
+        mock_client_cls.return_value = mock_client
+
+        request = _mock_request(
+            query_params={"code": "good-code"}, cookies={"desktop_login_port": "54321"}
+        )
+        result = _run(api_handlers.auth_callback(request))
+        self.assertEqual(result.status_code, 302)
+        self.assertIn("/login", result.headers["location"])
+        self.assertIn("auth_result=error", result.headers["location"])
+
+    @patch("src.api_handlers.CloudClient")
+    @patch("src.api_handlers.AuthenticationService")
+    def test_no_desktop_cookie_never_calls_cloud_client_for_bootstrap(self, mock_service_cls, mock_client_cls):
+        '''A plain (non-desktop) login must never touch the device-bootstrap path at all.'''
+        mock_service = MagicMock()
+        mock_service.complete_login_from_handoff = AsyncMock(return_value=self._login_response())
+        mock_service_cls.return_value = mock_service
+
+        request = _mock_request(query_params={"code": "good-code"}, cookies={})
+        result = _run(api_handlers.auth_callback(request))
+        self.assertIn("/?auth_result=success", result.headers["location"])
+        mock_client_cls.return_value.create_device_bootstrap.assert_not_called()
 
 
 class TestLogoutCsrf(unittest.TestCase):

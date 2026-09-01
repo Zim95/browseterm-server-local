@@ -4,7 +4,9 @@ Their job is to parse request data, call some class and return response data.
 '''
 
 import asyncio
+import json
 from datetime import datetime, timezone
+from typing import Optional
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
@@ -19,6 +21,7 @@ from src.authentication.authentication_helpers import authenticate_session
 from src.authentication.authentication_service import AuthenticationService, CSRF_COOKIE_NAME
 from src.cloud_client.client import CloudClient, CloudClientError
 from src.cloud_client.config import BROWSETERM_CLOUD_API_URL
+from src.common.config import COOKIE_SECURE, COOKIE_SAMESITE
 from src.common.logging_setup import get_logger, request_id_var
 from src.db_ops.container_db_ops import get_container_by_id, list_user_containers as list_user_containers_db, update_container_fields
 from src.db_ops.subscription_db_ops import get_user_current_subscription_plan
@@ -26,6 +29,14 @@ from src.db_ops.dto.subscription_dto import GetUserSubscriptionPlanModel
 from kubernetes.utils.quantity import parse_quantity
 
 logger = get_logger("api_handlers")
+
+# Desktop login (system-browser OAuth, see api_handlers.py's auth_provider_redirect/auth_callback
+# docstrings): the loopback callback port Desktop hands us only ever addresses 127.0.0.1 - the
+# HOST half of that redirect is hardcoded below, never taken from any request input, so this
+# cookie can only ever steer a browser back to a server already running on the SAME machine as
+# the browser itself. A short max_age (5 min) bounds how long a login attempt can sit unfinished.
+_DESKTOP_LOGIN_PORT_COOKIE = "desktop_login_port"
+_DESKTOP_LOGIN_PORT_COOKIE_MAX_AGE = 300
 
 
 def _csrf_ok(request: Request) -> bool:
@@ -39,13 +50,50 @@ def _csrf_ok(request: Request) -> bool:
     return bool(header_token) and bool(cookie_token) and header_token == cookie_token
 
 
+def _validated_desktop_port(raw: Optional[str]) -> Optional[int]:
+    '''A plain TCP port number, nothing else - this is the ONLY thing ever taken from the
+    caller to build the eventual http://127.0.0.1:<port>/callback redirect (auth_callback), so
+    validating it strictly here is what keeps that redirect confined to the loopback interface.'''
+    if not raw:
+        return None
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
 async def auth_provider_redirect(request: Request) -> RedirectResponse:
     '''
     GET /auth/{provider} -- p07.md section 7: Local's login buttons no longer initiate provider
     OAuth themselves, they just redirect to Cloud, which is the sole OAuth authority.
+
+    Desktop login (?target=desktop&desktop_port=<n>): Google/GitHub actively block or challenge
+    OAuth attempted from an embedded WebView (exactly what browseterm-desktop's pywebview window
+    is) - a well-known platform policy, not something fixable in this app's own code. Desktop
+    instead opens this URL in the user's real SYSTEM browser and starts a loopback HTTP server on
+    127.0.0.1:<desktop_port> to receive the result. Cloud itself is NOT told about any of this -
+    the OAuth `target` Cloud sees stays "local" always (oauth_handlers.py's own
+    `_TARGET_CALLBACKS` only ever allows redirecting to a fixed, server-known URL, by design, so a
+    dynamic per-run loopback port could never be threaded through it safely anyway). Instead, this
+    handler remembers the desktop_port in a short-lived cookie on the SAME browser tab that's
+    about to go do the OAuth round trip through Cloud and the provider and land back here - by the
+    time auth_callback runs, that cookie is still present (same browser, same domain), and it
+    finishes the loopback handoff itself. See auth_callback for the other half.
     '''
     provider = request.path_params["provider"]
-    return RedirectResponse(url=f"{BROWSETERM_CLOUD_API_URL}/auth/{provider}/start?target=local", status_code=302)
+    redirect = RedirectResponse(url=f"{BROWSETERM_CLOUD_API_URL}/auth/{provider}/start?target=local", status_code=302)
+    desktop_port = _validated_desktop_port(request.query_params.get("desktop_port"))
+    if request.query_params.get("target") == "desktop" and desktop_port is not None:
+        redirect.set_cookie(
+            key=_DESKTOP_LOGIN_PORT_COOKIE,
+            value=str(desktop_port),
+            max_age=_DESKTOP_LOGIN_PORT_COOKIE_MAX_AGE,
+            httponly=True,
+            secure=COOKIE_SECURE,
+            samesite=COOKIE_SAMESITE,
+        )
+    return redirect
 
 
 async def auth_callback(request: Request) -> Response:
@@ -53,6 +101,17 @@ async def auth_callback(request: Request) -> Response:
     GET /auth/callback?code=<handoff> -- Cloud redirects the browser here after finishing OAuth
     itself. Redeems the one-time handoff against Cloud (never touches provider tokens or Cloud's
     Postgres/Redis directly) and establishes the local browser session.
+
+    Desktop login's second half (see auth_provider_redirect): if the browser still carries the
+    desktop_login_port cookie set before the OAuth round trip, this is a desktop login - instead
+    of landing the (real, system) browser on Local's own home page, mint a device-bootstrap code
+    server-side (the exact same call device_bootstrap makes, just made here directly since this
+    request has no session cookie of its own yet to satisfy that route's own auth) and redirect to
+    Desktop's waiting loopback server with it. Desktop then redeems that code against Cloud's
+    public /auth/device-bootstrap/redeem exactly as it always has - nothing downstream of the
+    bootstrap code changes. The cookie is one-shot: always cleared here, whether or not this path
+    is taken, so a later ordinary (non-desktop) login on the same browser is never affected by a
+    stale attempt.
     '''
     code = request.query_params.get("code")
     if not code:
@@ -65,7 +124,22 @@ async def auth_callback(request: Request) -> Response:
         return RedirectResponse(
             url="/login?auth_result=error&error_message=Authentication+failed", status_code=302
         )
-    redirect = RedirectResponse(url="/?auth_result=success", status_code=302)
+
+    desktop_port = _validated_desktop_port(request.cookies.get(_DESKTOP_LOGIN_PORT_COOKIE))
+    redirect_url = "/?auth_result=success"
+    if desktop_port is not None:
+        try:
+            session_data = json.loads(login_response.body)
+            user_id = session_data["user_info"]["id"]
+            bootstrap_code = CloudClient().create_device_bootstrap(user_id)
+            redirect_url = f"http://127.0.0.1:{desktop_port}/callback?code={bootstrap_code}"
+        except (CloudClientError, KeyError, ValueError, TypeError):
+            logger.error("desktop device bootstrap failed", exc_info=True)
+            redirect_url = "/login?auth_result=error&error_message=Could+not+register+this+device"
+
+    redirect = RedirectResponse(url=redirect_url, status_code=302)
+    if desktop_port is not None:
+        redirect.delete_cookie(_DESKTOP_LOGIN_PORT_COOKIE)
     for cookie_header in login_response.headers.getlist("set-cookie"):
         redirect.headers.append("set-cookie", cookie_header)
     return redirect
