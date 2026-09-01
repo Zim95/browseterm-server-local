@@ -77,37 +77,53 @@ class ContainerService:
     '''
     def __init__(self) -> None:
         '''
-        Initialize the ContainerService.
+        Initialize the ContainerService. container-maker's gRPC client (mTLS certs read from its
+        Kubernetes Secret + the channel itself) is deliberately NOT constructed here - only
+        create_container_in_k8s/delete_container_in_k8s/save_container_in_k8s actually touch
+        container-maker; get_container_info/list_user_containers/update_container/
+        create_container_in_db/delete_container_in_db are pure DB reads/writes via Cloud's API
+        and never reference self.stub at all. Building it eagerly meant EVERY ContainerService()
+        instantiation - including a plain "list my containers" call - required container-maker's
+        certs Secret to exist, which broke the terminal list entirely on any cluster where that
+        Secret isn't provisioned (container-maker not deployed there). See _ensure_grpc_client().
         '''
-        # read certificates directly from Kubernetes secrets
-        self.client_key: bytes = read_cert_from_k8s_secret(
+        self.stub: Optional[ContainerMakerAPIStub] = None
+        self.channel: Optional[grpc.Channel] = None
+
+    def _ensure_grpc_client(self) -> None:
+        '''
+        Lazily read container-maker's mTLS certs from its Kubernetes Secret and open the gRPC
+        channel, exactly once per instance. Only called by the three methods that actually need
+        container-maker - a DB-only call path never reaches this and never needs the Secret.
+        '''
+        if self.stub is not None:
+            return
+        client_key: bytes = read_cert_from_k8s_secret(
             CONTAINER_MAKER_CERTS_SECRET_NAME,
             NAMESPACE,
             'client.key'
         )
-        self.client_cert: bytes = read_cert_from_k8s_secret(
+        client_cert: bytes = read_cert_from_k8s_secret(
             CONTAINER_MAKER_CERTS_SECRET_NAME,
             NAMESPACE,
             'client.crt'
         )
-        self.ca_cert: bytes = read_cert_from_k8s_secret(
+        ca_cert: bytes = read_cert_from_k8s_secret(
             CONTAINER_MAKER_CERTS_SECRET_NAME,
             NAMESPACE,
             'ca.crt'
         )
-
-        # create GRPC channel and stub
-        self.grpc_utils: GRPCUtils = GRPCUtils(
+        grpc_utils: GRPCUtils = GRPCUtils(
             host=CONTAINER_MAKER_HOST,
             port=CONTAINER_MAKER_PORT,
             stub_class=ContainerMakerAPIStub,
             secure=True,
-            client_key=self.client_key,
-            client_cert=self.client_cert,
-            ca_cert=self.ca_cert
+            client_key=client_key,
+            client_cert=client_cert,
+            ca_cert=ca_cert
         )
-        self.channel: grpc.Channel = self.grpc_utils.channel
-        self.stub: ContainerMakerAPIStub = self.grpc_utils.stub
+        self.channel = grpc_utils.channel
+        self.stub = grpc_utils.stub
 
     async def get_container_info(self, get_container_request: GetContainerRequest) -> ContainerResponseModel:
         '''
@@ -173,6 +189,7 @@ class ContainerService:
                 raise Exception(f"Image with id {create_container_k8s_request.image_id} not found")
             image_name = image['image']
         try:
+            self._ensure_grpc_client()
             resource_req_model: ResourceRequirementsModel = ResourceRequirementsModel(
                 cpu_request=ResourceUnitConverter.derive_cpu_request(create_container_k8s_request.resource_limits.cpu_limit, RESOURCE_CPU_REQUEST_RATIO),
                 cpu_limit=create_container_k8s_request.resource_limits.cpu_limit,
@@ -317,6 +334,7 @@ class ContainerService:
         Delete a container from Kubernetes.
         '''
         try:
+            self._ensure_grpc_client()
             delete_container_k8s_model = DeleteContainerDataModel(
                 container_id=delete_container_k8s_request.container_id,
                 network_name=delete_container_k8s_request.network_name
@@ -347,6 +365,7 @@ class ContainerService:
         not this return value.
         '''
         try:
+            self._ensure_grpc_client()
             grpc_save_container_request = GRPCSaveContainerRequest(
                 container_id=save_container_k8s_request.container_id,
                 network_name=save_container_k8s_request.network_name
