@@ -48,7 +48,9 @@ app.add_api_route(path="/echo", endpoint=api_handlers.echo, methods=["POST"])
 app.add_api_route(path="/", endpoint=template_handlers.home, methods=["GET"])
 app.add_api_route(path="/terminals", endpoint=template_handlers.terminals, methods=["GET"])
 app.add_api_route(path="/terminalpage", endpoint=template_handlers.terminalpage, methods=["GET"])
-app.add_api_route(path="/subscriptions", endpoint=template_handlers.subscriptions, methods=["GET"])
+# Subscriptions: commented out per explicit request -- "we don't need subscriptions for now".
+# Backend quota/plan-gating logic (resume_container, create_container, etc.) is untouched.
+# app.add_api_route(path="/subscriptions", endpoint=template_handlers.subscriptions, methods=["GET"])
 app.add_api_route(path="/payment", endpoint=template_handlers.payment, methods=["GET"])
 app.add_api_route(path="/profile", endpoint=template_handlers.profile, methods=["GET"])
 app.add_api_route(path="/login", endpoint=template_handlers.login, methods=["GET"])
@@ -67,6 +69,7 @@ app.add_api_route(path="/logout", endpoint=api_handlers.logout, methods=["POST"]
 app.add_api_route(path="/device/bootstrap", endpoint=api_handlers.device_bootstrap, methods=["POST"])
 
 # container apis
+app.add_api_route(path="/device-quota", endpoint=api_handlers.get_device_quota, methods=["GET"])
 app.add_api_route(path="/get-container-info/{container_id}", endpoint=api_handlers.get_container_info, methods=["GET"])
 app.add_api_route(path="/create-container-in-db", endpoint=api_handlers.create_container_in_db, methods=["POST"])
 app.add_api_route(path="/create-container-in-k8s", endpoint=api_handlers.create_container_in_k8s, methods=["POST"])

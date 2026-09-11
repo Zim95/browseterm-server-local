@@ -248,6 +248,26 @@ async def create_payment(request: Request) -> JSONResponse:
 
 
 @authenticate_session
+async def get_device_quota(request: Request) -> JSONResponse:
+    '''
+    GET /device-quota -- lets the terminals page re-check the active device's remaining quota
+    (available = allocated - used) without a full page reload, so the Create Terminal form's
+    CPU/Memory/Storage bounds stay accurate after a terminal is created (or another one is
+    hibernated/deleted) in the same browser session, not just whatever was true when the page
+    first loaded (src/template_handlers.py:terminals does the same lookup at render time - this
+    is the same call, callable again on demand). Fails open to `{"device": null}` on any Cloud
+    error rather than a 500 - the create-terminal modal's own resource controls already handle
+    "no device" the same way they handle "not fetched yet".
+    '''
+    try:
+        device = CloudClient().get_active_device(request.state.user_info['id'])
+    except CloudClientError:
+        logger.error("could not fetch active device for quota refresh", exc_info=True)
+        device = None
+    return JSONResponse(content={"device": device})
+
+
+@authenticate_session
 async def get_container_info(request: Request) -> JSONResponse:
     '''
     Authentication: This handler needs to be authenticated.

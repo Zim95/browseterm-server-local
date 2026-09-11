@@ -17,11 +17,11 @@ class ProfileUtilities {
     }
 
     /**
-     * Get current subscription plan from window object
-     * @returns {Object} Subscription plan object
+     * Get this user's currently active device from window object
+     * @returns {Object|null} Device object, or null if no device is active
      */
-    static getCurrentPlanFromTemplate() {
-        return window.currentSubscriptionPlan || {};
+    static getActiveDeviceFromTemplate() {
+        return window.activeDevice || null;
     }
 
     /**
@@ -90,7 +90,7 @@ class ProfileHandler {
         console.log('ProfileHandler initialized');
         this.elements = {};
         this.userData = null;
-        this.currentPlan = null;
+        this.activeDevice = null;
     }
 
     /**
@@ -116,7 +116,7 @@ class ProfileHandler {
         this.elements = {
             userName: document.getElementById('userName'),
             userEmail: document.getElementById('userEmail'),
-            currentPlan: document.getElementById('currentPlan'),
+            currentDevice: document.getElementById('currentDevice'),
             profilePhoto: document.getElementById('profilePhoto'),
             uploadBtn: document.getElementById('uploadBtn'),
             photoUpload: document.getElementById('photoUpload')
@@ -134,9 +134,9 @@ class ProfileHandler {
             this.userData = ProfileUtilities.getUserDataFromTemplate();
             console.log('User data loaded:', this.userData);
 
-            // Get current subscription plan
-            this.currentPlan = await this.getCurrentSubscription();
-            console.log('Current plan:', this.currentPlan);
+            // Get this user's currently active device
+            this.activeDevice = await this.getActiveDevice();
+            console.log('Active device:', this.activeDevice);
 
             // Update UI
             this.updateUI();
@@ -154,14 +154,13 @@ class ProfileHandler {
     }
 
     /**
-     * Get current subscription (simulated API call)
-     * @returns {Promise<Object>} Subscription plan object
+     * Get this user's currently active device (already fetched server-side from Cloud - see
+     * src/template_handlers.py:profile - and passed down via window.activeDevice)
+     * @returns {Promise<Object|null>} Device object, or null if none is active
      */
-    async getCurrentSubscription() {
-        console.log('Fetching current subscription...');
-        // For now, just return the plan from template
-        // In the future, this could be an actual API call
-        return ProfileUtilities.getCurrentPlanFromTemplate();
+    async getActiveDevice() {
+        console.log('Reading active device from template...');
+        return ProfileUtilities.getActiveDeviceFromTemplate();
     }
 
     /**
@@ -171,7 +170,7 @@ class ProfileHandler {
         // Update text content
         this.elements.userName.textContent = this.userData.name;
         this.elements.userEmail.textContent = this.userData.email;
-        this.elements.currentPlan.textContent = this.currentPlan.name || 'No Plan';
+        this.elements.currentDevice.textContent = (this.activeDevice && this.activeDevice.device_name) || 'No active device';
 
         // Update profile picture
         this.updateProfilePicture(this.userData.profile_picture_url);
@@ -231,7 +230,7 @@ class ProfileHandler {
     removeLoadingStates() {
         this.elements.userName.classList.remove('loading');
         this.elements.userEmail.classList.remove('loading');
-        this.elements.currentPlan.classList.remove('loading');
+        this.elements.currentDevice.classList.remove('loading');
     }
 
     /**
@@ -241,11 +240,11 @@ class ProfileHandler {
     showError(message) {
         this.elements.userName.textContent = message;
         this.elements.userEmail.textContent = message;
-        this.elements.currentPlan.textContent = message;
+        this.elements.currentDevice.textContent = message;
 
         this.elements.userName.classList.add('error');
         this.elements.userEmail.classList.add('error');
-        this.elements.currentPlan.classList.add('error');
+        this.elements.currentDevice.classList.add('error');
     }
 
     /**

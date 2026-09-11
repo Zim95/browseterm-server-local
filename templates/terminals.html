@@ -46,8 +46,9 @@
                 <label for="cpu">CPU:</label>
                 <div class="number-input-group">
                     <button type="button" class="number-btn" id="cpuDecrease">-</button>
-                    <input type="number" id="cpu" name="cpu" value="1" min="1" max="30" readonly>
+                    <input type="number" id="cpu" name="cpu" value="1" min="1" max="30">
                     <button type="button" class="number-btn" id="cpuIncrease">+</button>
+                    <span class="quota-display" id="cpuQuota">/ 0 cores</span>
                 </div>
                 <span class="subscription-info" id="cpuInfo" style="display: none;"></span>
             </div>
@@ -56,8 +57,9 @@
                 <label for="memory">Memory:</label>
                 <div class="number-input-group">
                     <button type="button" class="number-btn" id="memoryDecrease">-</button>
-                    <input type="number" id="memory" name="memory" value="1" min="1" max="30" readonly>
+                    <input type="number" id="memory" name="memory" value="1" min="1" max="30">
                     <button type="button" class="number-btn" id="memoryIncrease">+</button>
+                    <span class="quota-display" id="memoryQuota">/ 0 GiB</span>
                 </div>
                 <span class="subscription-info" id="memoryInfo" style="display: none;"></span>
             </div>
@@ -66,8 +68,9 @@
                 <label for="storage">Storage:</label>
                 <div class="number-input-group">
                     <button type="button" class="number-btn" id="storageDecrease">-</button>
-                    <input type="number" id="storage" name="storage" value="2" min="1" max="30" readonly>
+                    <input type="number" id="storage" name="storage" value="2" min="1" max="30">
                     <button type="button" class="number-btn" id="storageIncrease">+</button>
+                    <span class="quota-display" id="storageQuota">/ 0 GiB</span>
                 </div>
                 <span class="subscription-info" id="storageInfo" style="display: none;"></span>
             </div>
@@ -83,11 +86,10 @@
 
 {% block extra_js %}
 <script>
-    // Pass subscription data to JavaScript
+    // Pass device quota data to JavaScript (see src/template_handlers.py:terminals)
     window.userInfo = {{ userInfo|tojson|safe }};
     window.images = {{ images|tojson|safe }};
-    window.currentSubscriptionPlan = {{ currentSubscriptionPlan|tojson|safe }};
-    window.subscriptionPlans = {{ subscriptions|tojson|safe }};
+    window.activeDevice = {{ activeDevice|tojson|safe }};
     window.sseToken = {{ (sseToken or '')|tojson|safe }};
     window.cloudApiUrl = {{ (cloudApiUrl or '')|tojson|safe }};
 </script>

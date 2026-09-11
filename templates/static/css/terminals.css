@@ -331,6 +331,12 @@
     opacity: 0.6;
 }
 
+.quota-display {
+    font-size: 0.85rem;
+    color: #666;
+    white-space: nowrap;
+}
+
 .subscription-info {
     display: block;
     font-size: 0.85rem;
@@ -583,6 +589,10 @@ body.dark-mode .number-input-group input:disabled {
 }
 
 body.dark-mode .subscription-info {
+    color: #aaa;
+}
+
+body.dark-mode .quota-display {
     color: #aaa;
 }
 

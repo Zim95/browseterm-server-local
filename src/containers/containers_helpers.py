@@ -1,6 +1,4 @@
-from ast import Dict
 import time
-from typing import Any
 import re
 
 # kubernetes
@@ -10,9 +8,6 @@ from kubernetes.client.rest import ApiException
 # common
 from src.common.config import CERT_MANAGER_CRON_JOB_NAME
 from src.common.config import CERT_MANAGER_CRON_JOB_NAMESPACE
-from src.db_ops.container_db_ops import list_user_containers
-from src.db_ops.subscription_db_ops import get_user_current_subscription_plan
-from src.db_ops.dto.subscription_dto import GetUserSubscriptionPlanModel
 from src.common.logging_setup import get_logger
 
 logger = get_logger("containers_helpers")
@@ -154,33 +149,6 @@ class CertificateUtils:
         except ApiException as e:
             logger.error("error deleting secret", extra={"secret_name": secret_name}, exc_info=True)
             raise
-
-
-async def is_user_within_container_limit(user_id: str) -> Dict:
-    '''
-    Check if the user is within the container limit.
-    Args:
-        user_id: User ID
-    Returns:
-        Dict containing the container limit information
-    Raises:
-        Exception: If database operation fails
-    '''
-    try:
-        # get the current subscription plan of the user and get the max containers a user can have.
-        current_subscription_plan: Dict[str, Any] = await get_user_current_subscription_plan(GetUserSubscriptionPlanModel(user_id=user_id))
-        current_subscription_plan_max_containers: int = current_subscription_plan['max_containers']
-        # get the number of containers the user has
-        number_of_containers: int = len(await list_user_containers(user_id))
-        # return True if the user is within the container limit, False otherwise
-        return {
-            'is_within_limit': number_of_containers < current_subscription_plan_max_containers,
-            'number_of_containers': number_of_containers,
-            'current_subscription_plan_max_containers': current_subscription_plan_max_containers
-        }
-    except Exception as e:
-        logger.error("error checking user container limit", extra={"user_id": user_id}, exc_info=True)
-        raise Exception(f"Error checking user container limit: {str(e)}")
 
 
 def sanitize_container_name(container_name: str) -> str:

@@ -16,6 +16,21 @@
     document.addEventListener('DOMContentLoaded', function() {
         console.log('Home page DOM is ready');
 
+        // src/api_handlers.py's auth_callback redirects a successful login here with
+        // ?auth_result=success (same query-param convention templates/static/js/login.js already
+        // uses for auth_result=error) - this is the only place that success ever gets shown to
+        // the user, so read it here and fire the notification.
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('auth_result') === 'success') {
+            if (window.notifications) {
+                window.notifications.success('Welcome!', 'Welcome to BrowseTerm!', 4000);
+            }
+            // Strip the param so a page refresh doesn't re-show the notification.
+            params.delete('auth_result');
+            const newSearch = params.toString();
+            window.history.replaceState({}, '', window.location.pathname + (newSearch ? `?${newSearch}` : ''));
+        }
+
         // Add any home page specific functionality here
         const contentContainer = document.querySelector('.content-container');
         if (contentContainer) {

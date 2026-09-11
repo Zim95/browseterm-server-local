@@ -16,28 +16,13 @@ class TerminalsUtilities {
     }
 
     /**
-     * Get current subscription plan from window object
-     * @returns {Object} Current subscription plan
+     * Get this user's currently active device from window object (see
+     * src/template_handlers.py:terminals) - resource controls are bounded by its remaining
+     * quota now, not by a subscription plan.
+     * @returns {Object|null} Device object, or null if none is active
      */
-    static getCurrentSubscriptionPlan() {
-        return window.currentSubscriptionPlan || {};
-    }
-
-    /**
-     * Get all subscription plans from window object
-     * @returns {Array} All subscription plans
-     */
-    static getAllSubscriptionPlans() {
-        return window.subscriptionPlans || [];
-    }
-
-    /**
-     * Check if resource is configurable
-     * @param {string} value - Resource value
-     * @returns {boolean} True if configurable
-     */
-    static isConfigurable(value) {
-        return value && value.toString().toLowerCase() === 'configurable';
+    static getActiveDevice() {
+        return window.activeDevice || null;
     }
 
     /**
@@ -89,18 +74,24 @@ class TerminalsUtilities {
     }
 
     /**
-     * Adjust number input value
+     * Adjust number input value, bounded by the input's OWN current min/max attributes (set
+     * dynamically from the active device's remaining quota - see
+     * TerminalsHandler.configureResourceControl) rather than a fixed default, so the +/- buttons
+     * can never push a value past what the device actually has available. Dispatches a native
+     * 'input' event afterward since setting .value programmatically doesn't fire one on its own -
+     * this is what lets the Create button's own enabled/disabled state react immediately.
      * @param {HTMLInputElement} input - Input element
      * @param {number} change - Amount to change by
-     * @param {number} min - Minimum value
-     * @param {number} max - Maximum value
      */
-    static adjustNumber(input, change, min = 1, max = 30) {
-        const currentValue = parseInt(input.value) || min;
+    static adjustNumber(input, change) {
+        const min = parseInt(input.min, 10) || 1;
+        const max = parseInt(input.max, 10);
+        const currentValue = parseInt(input.value, 10) || min;
         const newValue = currentValue + change;
 
-        if (newValue >= min && newValue <= max) {
+        if (newValue >= min && (Number.isNaN(max) || newValue <= max)) {
             input.value = newValue;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
         }
     }
 
@@ -137,11 +128,7 @@ class TerminalsHandler {
         this.elements = {};
         this.terminals = [];
         this.operatingSystems = [];
-        this.currentPlan = null;
-        this.allPlans = [];
-        this.cpuConfigurable = false;
-        this.memoryConfigurable = false;
-        this.storageConfigurable = false;
+        this.deviceQuota = null; // { availableCpu, availableMemoryGb, availableStorageGb } - see loadDeviceQuota()
         // Track containers pending "Running" status - auto-cleanup on failure
         // Map of containerId -> { kubernetesId, networkName, userId }
         this.pendingContainers = new Map();
@@ -156,8 +143,8 @@ class TerminalsHandler {
         // Cache DOM elements
         this.cacheElements();
 
-        // Load subscription data and configure CPU/Memory/Storage controls
-        this.loadSubscriptionData();
+        // Load this device's remaining quota and bound CPU/Memory/Storage controls by it
+        this.loadDeviceQuota();
         this.configureResourceControls();
 
         // Load terminals
@@ -193,93 +180,82 @@ class TerminalsHandler {
             memoryIncrease: document.getElementById('memoryIncrease'),
             storageInput: document.getElementById('storage'),
             storageDecrease: document.getElementById('storageDecrease'),
-            storageIncrease: document.getElementById('storageIncrease')
+            storageIncrease: document.getElementById('storageIncrease'),
+            cpuQuota: document.getElementById('cpuQuota'),
+            memoryQuota: document.getElementById('memoryQuota'),
+            storageQuota: document.getElementById('storageQuota'),
+            submitBtn: document.getElementById('submitBtn')
         };
     }
 
     /**
-     * Load subscription data from backend
+     * Load this device's remaining quota (available = allocated - used, see
+     * browseterm-server/src/cloud/device_handlers.py's _serialize_device) from the backend.
      */
-    loadSubscriptionData() {
-        // Get current plan and all plans
-        this.currentPlan = TerminalsUtilities.getCurrentSubscriptionPlan();
-        this.allPlans = TerminalsUtilities.getAllSubscriptionPlans();
-        // Check if CPU, Memory, and Storage are configurable
-        this.cpuConfigurable = TerminalsUtilities.isConfigurable(
-            this.currentPlan.cpu_limit_per_container
-        );
-        this.memoryConfigurable = TerminalsUtilities.isConfigurable(
-            this.currentPlan.memory_limit_per_container
-        );
-        this.storageConfigurable = TerminalsUtilities.isConfigurable(
-            this.currentPlan.storage_limit_per_container
-        );
+    loadDeviceQuota() {
+        const device = TerminalsUtilities.getActiveDevice();
+        if (!device) {
+            this.deviceQuota = null;
+            return;
+        }
+        const bytesToGb = (bytes) => Math.max(0, Math.floor(bytes / (1024 ** 3)));
+        this.deviceQuota = {
+            availableCpu: Math.max(0, device.available_cpu),
+            availableMemoryGb: bytesToGb(device.available_memory_bytes),
+            availableStorageGb: bytesToGb(device.available_storage_bytes),
+        };
     }
 
     /**
-     * Configure CPU/Memory/Storage controls based on subscription plan
+     * Bound CPU/Memory/Storage controls by this device's remaining quota instead of subscription
+     * plan - Cloud's own POST /containers is still the real enforcement (it validates + reserves
+     * against the device's actual available capacity at creation time), this is only about
+     * showing the user a realistic max up front.
      */
     configureResourceControls() {
-        // Configure CPU controls
-        this.configureResourceControl('cpu', this.cpuConfigurable);
-
-        // Configure Memory controls
-        this.configureResourceControl('memory', this.memoryConfigurable);
-
-        // Configure Storage controls
-        this.configureResourceControl('storage', this.storageConfigurable);
+        const quota = this.deviceQuota || { availableCpu: 0, availableMemoryGb: 0, availableStorageGb: 0 };
+        this.configureResourceControl('cpu', quota.availableCpu);
+        this.configureResourceControl('memory', quota.availableMemoryGb);
+        this.configureResourceControl('storage', quota.availableStorageGb);
+        this.updateSubmitButtonState();
     }
 
     /**
-     * Configure a resource control (CPU, Memory, or Storage)
+     * Configure a resource control (CPU, Memory, or Storage), bounding it by `available` (this
+     * resource's remaining quota on the active device) and showing it as "/ <available> <unit>"
+     * next to the +/- control.
      * @param {string} resource - 'cpu', 'memory', or 'storage'
-     * @param {boolean} isConfigurable - Whether the resource is configurable
+     * @param {number} available - remaining quota for this resource
      */
-    configureResourceControl(resource, isConfigurable) {
+    configureResourceControl(resource, available) {
         const decreaseBtn = this.elements[`${resource}Decrease`];
         const increaseBtn = this.elements[`${resource}Increase`];
         const input = this.elements[`${resource}Input`];
+        const quotaDisplay = this.elements[`${resource}Quota`];
         const info = document.getElementById(`${resource}Info`);
+        const min = parseInt(input.min, 10) || 1;
+        // CPU is whole cores (Kubernetes cpu_limit convention); memory and storage are both
+        // submitted with a "Gi" suffix (see handleFormSubmit) so GiB is the unit that actually
+        // matches what gets requested, not an arbitrary display choice.
+        const unit = resource === 'cpu' ? 'cores' : 'GiB';
 
-        if (isConfigurable) {
-            // Enable controls
+        if (quotaDisplay) quotaDisplay.textContent = `/ ${available} ${unit}`;
+
+        if (available >= min) {
+            input.max = available;
+            input.value = Math.min(parseInt(input.value, 10) || min, available);
             decreaseBtn.disabled = false;
             increaseBtn.disabled = false;
             input.disabled = false;
             if (info) info.style.display = 'none';
         } else {
-            // Disable controls
+            // Not enough remaining quota on this device for even the minimum size.
             decreaseBtn.disabled = true;
             increaseBtn.disabled = true;
             input.disabled = true;
-
-            // Find plans with configurable resource
-            const configurablePlans = this.allPlans.filter(plan => {
-                let resourceValue;
-                if (resource === 'cpu') {
-                    resourceValue = plan.cpu_limit_per_container;
-                } else if (resource === 'memory') {
-                    resourceValue = plan.memory_limit_per_container;
-                } else {
-                    resourceValue = plan.storage_limit_per_container;
-                }
-                return TerminalsUtilities.isConfigurable(resourceValue);
-            });
-
-            // Build info message
-            if (configurablePlans.length > 0) {
-                const planNames = configurablePlans.map(p => p.name).join(', ');
-                const infoMessage = `ℹ️ Only available to ${planNames} subscription${configurablePlans.length > 1 ? 's' : ''}`;
-                if (info) {
-                    info.textContent = infoMessage;
-                    info.style.display = 'block';
-                }
-            } else {
-                const infoMessage = 'ℹ️ Coming soon';
-                if (info) {
-                    info.textContent = infoMessage;
-                    info.style.display = 'block';
-                }
+            if (info) {
+                info.textContent = 'ℹ️ Not enough device quota remaining for this resource';
+                info.style.display = 'block';
             }
         }
     }
@@ -531,48 +507,59 @@ class TerminalsHandler {
     }
 
     /**
-     * Setup number input controls (CPU/Memory)
-     * Only adds listeners if the control is enabled based on subscription
+     * Setup number input controls (CPU/Memory/Storage). Listeners are always attached - whether
+     * a control can actually be used is governed by its own `disabled` attribute (set in
+     * configureResourceControl based on the active device's remaining quota), not by whether a
+     * click handler exists at all. A disabled button never fires 'click', so this is sufficient.
      */
     setupNumberInputs() {
-        // CPU controls - only if configurable
-        if (this.cpuConfigurable && this.elements.cpuDecrease && this.elements.cpuIncrease && this.elements.cpuInput) {
-            this.elements.cpuDecrease.addEventListener('click', () => 
-                TerminalsUtilities.adjustNumber(this.elements.cpuInput, -1)
-            );
-            this.elements.cpuIncrease.addEventListener('click', () => 
-                TerminalsUtilities.adjustNumber(this.elements.cpuInput, 1)
-            );
-            console.log('CPU controls enabled');
-        } else {
-            console.log('CPU controls disabled (not available in current plan)');
+        if (this.elements.cpuDecrease && this.elements.cpuIncrease && this.elements.cpuInput) {
+            this.elements.cpuDecrease.addEventListener('click', () => TerminalsUtilities.adjustNumber(this.elements.cpuInput, -1));
+            this.elements.cpuIncrease.addEventListener('click', () => TerminalsUtilities.adjustNumber(this.elements.cpuInput, 1));
+        }
+        if (this.elements.memoryDecrease && this.elements.memoryIncrease && this.elements.memoryInput) {
+            this.elements.memoryDecrease.addEventListener('click', () => TerminalsUtilities.adjustNumber(this.elements.memoryInput, -1));
+            this.elements.memoryIncrease.addEventListener('click', () => TerminalsUtilities.adjustNumber(this.elements.memoryInput, 1));
+        }
+        if (this.elements.storageDecrease && this.elements.storageIncrease && this.elements.storageInput) {
+            this.elements.storageDecrease.addEventListener('click', () => TerminalsUtilities.adjustNumber(this.elements.storageInput, -1));
+            this.elements.storageIncrease.addEventListener('click', () => TerminalsUtilities.adjustNumber(this.elements.storageInput, 1));
         }
 
-        // Memory controls - only if configurable
-        if (this.memoryConfigurable && this.elements.memoryDecrease && this.elements.memoryIncrease && this.elements.memoryInput) {
-            this.elements.memoryDecrease.addEventListener('click', () =>
-                TerminalsUtilities.adjustNumber(this.elements.memoryInput, -1)
-            );
-            this.elements.memoryIncrease.addEventListener('click', () =>
-                TerminalsUtilities.adjustNumber(this.elements.memoryInput, 1)
-            );
-            console.log('Memory controls enabled');
-        } else {
-            console.log('Memory controls disabled (not available in current plan)');
-        }
+        // Re-validate the Create button every time any resource value changes - by the +/-
+        // buttons (which dispatch a synthetic 'input' event, see adjustNumber) or by the user
+        // typing directly into the (non-readonly-while-enabled) number input.
+        [this.elements.cpuInput, this.elements.memoryInput, this.elements.storageInput].forEach((input) => {
+            if (input) input.addEventListener('input', () => this.updateSubmitButtonState());
+        });
+    }
 
-        // Storage controls - only if configurable
-        if (this.storageConfigurable && this.elements.storageDecrease && this.elements.storageIncrease && this.elements.storageInput) {
-            this.elements.storageDecrease.addEventListener('click', () =>
-                TerminalsUtilities.adjustNumber(this.elements.storageInput, -1)
-            );
-            this.elements.storageIncrease.addEventListener('click', () =>
-                TerminalsUtilities.adjustNumber(this.elements.storageInput, 1)
-            );
-            console.log('Storage controls enabled');
-        } else {
-            console.log('Storage controls disabled (not available in current plan)');
-        }
+    /**
+     * Create Terminal is only enabled when CPU, Memory, and Storage are all within the active
+     * device's remaining quota (each input's own min/max, set from
+     * available_cpu/available_memory_bytes/available_storage_bytes in configureResourceControl).
+     * Cloud's POST /containers is still the real, authoritative check at creation time - this is
+     * just keeping the button itself honest about what's likely to succeed.
+     */
+    updateSubmitButtonState() {
+        if (!this.elements.submitBtn) return;
+        const allWithinBounds = [this.elements.cpuInput, this.elements.memoryInput, this.elements.storageInput]
+            .every((input) => this.isWithinDeviceQuota(input, parseInt(input && input.value, 10)));
+        this.elements.submitBtn.disabled = !allWithinBounds;
+    }
+
+    /**
+     * True if `value` is within `input`'s own current min/max (set from the active device's
+     * remaining quota - see configureResourceControl). Shared by updateSubmitButtonState (live,
+     * as the user types or clicks +/-) and handleFormSubmit's final check at Create time.
+     * @param {HTMLInputElement} input
+     * @param {number} value
+     */
+    isWithinDeviceQuota(input, value) {
+        if (!input || Number.isNaN(value)) return false;
+        const min = parseInt(input.min, 10) || 1;
+        const max = parseInt(input.max, 10);
+        return value >= min && (Number.isNaN(max) || value <= max);
     }
 
     /**
@@ -826,11 +813,15 @@ class TerminalsHandler {
     }
 
     /**
-     * Open modal for creating new terminal
+     * Open modal for creating new terminal. Refreshes device quota first (fire-and-forget is
+     * fine here, but we await it so resetForm's clamping already has the latest numbers) - the
+     * quota shown at page load can be stale if a terminal was created/hibernated/deleted earlier
+     * in the same browser session.
      */
-    openModal() {
+    async openModal() {
         this.elements.modalOverlay.classList.add('active');
         document.body.style.overflow = 'hidden';
+        await this.refreshDeviceQuota();
         this.resetForm();
     }
 
@@ -843,13 +834,35 @@ class TerminalsHandler {
     }
 
     /**
-     * Reset terminal creation form
+     * Re-fetches the active device's remaining quota from Local's own /device-quota (a thin
+     * session-authenticated proxy to Cloud's internal active-device lookup - see
+     * src/api_handlers.py:get_device_quota) and re-applies it to the resource controls/Create
+     * button. Fails open (logs, leaves whatever quota was already loaded) rather than blocking
+     * the modal on a transient network error.
+     */
+    async refreshDeviceQuota() {
+        try {
+            const response = await fetch('/device-quota');
+            const data = await response.json();
+            window.activeDevice = data.device;
+        } catch (error) {
+            console.error('Error refreshing device quota:', error);
+        }
+        this.loadDeviceQuota();
+        this.configureResourceControls();
+    }
+
+    /**
+     * Reset terminal creation form. Re-applies the current quota bounds afterward (not just the
+     * static 1/1/2 defaults) so a device with less than that remaining still shows a valid,
+     * in-bounds value and the Create button's state is correct immediately on open.
      */
     resetForm() {
         this.elements.terminalForm.reset();
         this.elements.cpuInput.value = 1;
         this.elements.memoryInput.value = 1;
         this.elements.storageInput.value = 2;
+        this.configureResourceControls();
     }
 
     /**
@@ -924,9 +937,32 @@ class TerminalsHandler {
             const imageRecord = TerminalsUtilities.findImageByName(selectedImageName);
 
             // Get resource values (use defaults for non-configurable)
-            const cpuValue = this.cpuConfigurable ? parseInt(formData.get('cpu')) : 1;
-            const memoryValue = this.memoryConfigurable ? parseInt(formData.get('memory')) : 1;
-            const storageValue = this.storageConfigurable ? parseInt(formData.get('storage')) : 2;
+            // Always read the actual form values now - no more subscription-tier gating on
+            // whether the user's chosen CPU/Memory/Storage even gets used (see
+            // configureResourceControl/updateSubmitButtonState for the real, device-quota-based
+            // bound enforcement instead).
+            const cpuValue = parseInt(formData.get('cpu'), 10) || 1;
+            const memoryValue = parseInt(formData.get('memory'), 10) || 1;
+            const storageValue = parseInt(formData.get('storage'), 10) || 2;
+
+            // Final, authoritative-on-this-side check before ever calling the backend - the
+            // Create button is already disabled whenever a value is out of bounds
+            // (updateSubmitButtonState), but this guards the rare path where the button was
+            // clicked in the instant before that state updated, or the form was submitted via
+            // Enter. Cloud's own POST /containers still re-validates against the device's real
+            // available capacity regardless (container_handlers.py's create_container) - this is
+            // just a fast, friendly local check, not a replacement for that one.
+            if (!this.isWithinDeviceQuota(this.elements.cpuInput, cpuValue)
+                || !this.isWithinDeviceQuota(this.elements.memoryInput, memoryValue)
+                || !this.isWithinDeviceQuota(this.elements.storageInput, storageValue)) {
+                this.hideLoadingState(submitBtn, originalText);
+                TerminalsUtilities.showNotification(
+                    'error', 'Not Enough Quota',
+                    'The requested CPU, Memory, or Storage exceeds this device\'s remaining quota.',
+                    5000
+                );
+                return;
+            }
 
             // Step 1: Create container in DB
             const dbData = {
@@ -962,6 +998,12 @@ class TerminalsHandler {
 
             // Close modal immediately after DB success
             this.closeModal();
+
+            // The DB-create step is also where Cloud reserved this terminal's cpu/memory/storage
+            // against the active device's quota (see container_handlers.py's create_container) -
+            // refresh so the NEXT terminal's form reflects what's actually left, not what was
+            // available when this page first loaded.
+            this.refreshDeviceQuota();
 
             // Add the new terminal to the list with loading state
             const newTerminal = {

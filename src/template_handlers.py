@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse
 
 from src.common.config import SOCKET_SSH_WSS_URL
 from src.authentication.authentication_helpers import authenticate_session
-from src.cloud_client.client import CloudClient
+from src.cloud_client.client import CloudClient, CloudClientError
 from src.cloud_client.config import BROWSETERM_CLOUD_API_URL
 from src.db_ops.image_db_ops import list_all_existing_images
 from src.db_ops.subscription_db_ops import list_all_existing_subscription_types
@@ -36,9 +36,22 @@ async def home(request: Request) -> HTMLResponse:
 async def terminals(request: Request) -> HTMLResponse:
     '''
     Terminals page template.
+
+    CPU/memory/storage controls are bounded by the active device's remaining quota (available =
+    allocated - used, see browseterm-server/src/cloud/device_handlers.py's _serialize_device) --
+    not by subscription plan any more, since subscriptions no longer gate anything about terminal
+    creation (per explicit request). Cloud's own POST /containers is still the real enforcement
+    (validates + reserves against the device's actual available capacity at creation time no
+    matter what this page shows) -- this is only about showing a realistic bound up front instead
+    of the flat static max the resource inputs' own HTML attribute used to have regardless of
+    whether the device could actually support it.
     '''
-    subscriptions: list = await list_all_existing_subscription_types()
     images: list = await list_all_existing_images()
+    active_device = None
+    try:
+        active_device = CloudClient().get_active_device(request.state.user_info['id'])
+    except CloudClientError:
+        logger.error("could not fetch active device for terminals page", exc_info=True)
     # P10: one-time-ish SSE token (see ~/browseterm/p.md's "P10" section) so the browser can
     # connect directly to Cloud's GET /events/stream for real-time container status updates -
     # Local no longer relays/polls for this itself.
@@ -48,10 +61,9 @@ async def terminals(request: Request) -> HTMLResponse:
         "terminals.html",
         {
             "request": request,
-            "subscriptions": subscriptions,
             "images": images,
             "userInfo": request.state.user_info,
-            "currentSubscriptionPlan": request.state.current_subscription_plan,
+            "activeDevice": active_device,
             "sseToken": sse_token,
             "cloudApiUrl": BROWSETERM_CLOUD_API_URL,
         }
@@ -191,14 +203,26 @@ async def payment(request: Request) -> HTMLResponse:
 async def profile(request: Request) -> HTMLResponse:
     '''
     User profile page template.
+
+    Shows the user's currently active device (Desktop's "at most one ACTIVE device per user"
+    invariant, see browseterm-server/src/cloud/device_handlers.py's _demote_other_devices) instead
+    of a subscription plan -- subscriptions are commented out for now, see app.py. Local holds no
+    device Bearer token itself (that credential belongs to Desktop alone), so this goes through
+    Cloud's internal-token-gated GET /internal/users/{user_id}/active-device rather than the
+    Bearer-gated /devices route. Fails open to None on any Cloud error -- a Profile page that
+    can't reach Cloud should still render, just without a device name to show.
     '''
+    active_device = None
+    try:
+        active_device = CloudClient().get_active_device(request.state.user_info['id'])
+    except CloudClientError:
+        logger.error("could not fetch active device for profile page", exc_info=True)
     return templates.TemplateResponse(
-        "profile.html", 
+        "profile.html",
         {
             "request": request,
             "userInfo": request.state.user_info,
-            "subscriptionInfo": request.state.subscription_info,
-            "currentSubscriptionPlan": request.state.current_subscription_plan
+            "activeDevice": active_device,
         }
     )
 

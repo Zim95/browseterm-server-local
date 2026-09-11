@@ -201,3 +201,11 @@ class CloudClient:
 
     def get_current_subscription(self, user_id: str) -> dict:
         return self._request("GET", "/subscriptions/current", params={"user_id": user_id})["subscription_type"]
+
+    def get_active_device(self, user_id: str) -> Optional[dict]:
+        '''GET /internal/users/{user_id}/active-device. Local never holds a device Bearer token
+        (that credential belongs to Desktop alone) so it can't call Cloud's Bearer-gated /devices
+        route directly - this is the trusted-SYSTEM-caller route instead, same internal-token
+        pattern as every other call in this file. Returns None (not an error) when the user has
+        no active device -- Profile's normal "nothing to show" case.'''
+        return self._request("GET", f"/internal/users/{user_id}/active-device")["device"]

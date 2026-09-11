@@ -62,7 +62,7 @@ from src.containers.dto.delete_container_dto import DeleteContainerDataModel
 from src.containers.dto.delete_container_response_dto import DeleteContainerResponseModel
 
 # helpers
-from src.containers.containers_helpers import is_user_within_container_limit, sanitize_container_name
+from src.containers.containers_helpers import sanitize_container_name
 
 # builtins
 import asyncio
@@ -143,17 +143,16 @@ class ContainerService:
     async def create_container_in_db(self, create_container_db_request: CreateContainerDBRequest) -> dict:
         '''
         Create a Container in DB.
+
+        No subscription-based container-count limit any more (per explicit request: "creating
+        terminals... is no longer limited by the subscription... the ability to create a terminal
+        is based on the remaining quota"). Cloud's own POST /containers is the real gate now -
+        it validates the requested cpu/memory/storage against the active device's actual
+        available (allocated - used) capacity and reserves usage against it before this row is
+        even created (see browseterm-server/src/cloud/container_handlers.py's create_container,
+        P12/P13) - a device-quota check, not a subscription-tier one.
         '''
         try:
-            # check if the user is within the container limit
-            is_within_limit: Dict = await is_user_within_container_limit(create_container_db_request.user_id)
-            if not is_within_limit['is_within_limit']:
-                raise Exception(
-                    f"Maximum number of containers reached. "
-                    f"You can have up to {is_within_limit['current_subscription_plan_max_containers']} containers. "
-                    f"You have {is_within_limit['number_of_containers']} containers."
-                )
-
             create_container_db_model: CreateContainerDBModel = CreateContainerDBModel(
                 user_id=create_container_db_request.user_id,
                 image_id=create_container_db_request.image_id,
