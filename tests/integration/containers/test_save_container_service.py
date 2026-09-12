@@ -104,4 +104,4 @@ class TestSaveContainerInK8S(TestCase):
         self.assertEqual(ctx.exception.status_code, 500)
         self.assertNotIn('HTTPHeaderDict', ctx.exception.detail)
         self.assertNotIn('Reason: Forbidden', ctx.exception.detail)
-        self.assertIn('resource limit', ctx.exception.detail)
+        self.assertIn('remaining capacity', ctx.exception.detail)

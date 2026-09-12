@@ -185,15 +185,15 @@ def clean_k8s_error_message(raw: str, fallback: str) -> str:
             if message:
                 if 'exceeded quota' in message.lower():
                     return (
-                        "You've reached your plan's resource limit. Hibernate or delete "
-                        "another terminal to free up a slot, or upgrade your plan, then try again."
+                        "This device doesn't have enough remaining capacity for this terminal. "
+                        "Hibernate or delete another terminal to free up room, then try again."
                     )
                 return message
         except (json.JSONDecodeError, AttributeError):
             pass
     if 'exceeded quota' in raw.lower():
         return (
-            "You've reached your plan's resource limit. Hibernate or delete another "
-            "terminal to free up a slot, or upgrade your plan, then try again."
+            "This device doesn't have enough remaining capacity for this terminal. "
+            "Hibernate or delete another terminal to free up room, then try again."
         )
     return fallback

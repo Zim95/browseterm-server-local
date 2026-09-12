@@ -49,7 +49,8 @@ app.add_api_route(path="/", endpoint=template_handlers.home, methods=["GET"])
 app.add_api_route(path="/terminals", endpoint=template_handlers.terminals, methods=["GET"])
 app.add_api_route(path="/terminalpage", endpoint=template_handlers.terminalpage, methods=["GET"])
 # Subscriptions: commented out per explicit request -- "we don't need subscriptions for now".
-# Backend quota/plan-gating logic (resume_container, create_container, etc.) is untouched.
+# Backend plan-gating logic still remains only in resume_container (see its docstring) --
+# create_container/create_container_in_db no longer have any subscription-based check at all.
 # app.add_api_route(path="/subscriptions", endpoint=template_handlers.subscriptions, methods=["GET"])
 app.add_api_route(path="/payment", endpoint=template_handlers.payment, methods=["GET"])
 app.add_api_route(path="/profile", endpoint=template_handlers.profile, methods=["GET"])
@@ -79,6 +80,7 @@ app.add_api_route(path="/delete-container-in-db", endpoint=api_handlers.delete_c
 app.add_api_route(path="/delete-container-in-k8s", endpoint=api_handlers.delete_container_in_k8s, methods=["POST"])
 app.add_api_route(path="/save-container", endpoint=api_handlers.save_container, methods=["POST"])
 app.add_api_route(path="/resume-container", endpoint=api_handlers.resume_container, methods=["POST"])
+app.add_api_route(path="/hibernate-container", endpoint=api_handlers.hibernate_container, methods=["POST"])
 app.add_api_route(path="/container-activity", endpoint=api_handlers.container_activity, methods=["POST"])
 
 

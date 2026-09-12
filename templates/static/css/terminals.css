@@ -167,6 +167,26 @@
     transform: translateY(-2px);
 }
 
+.info-btn {
+    background-color: #d1ecf1;
+    color: #0c5460;
+}
+
+.info-btn:hover {
+    background-color: #b8e2ea;
+    transform: translateY(-2px);
+}
+
+.hibernate-btn {
+    background-color: #e6e4f5;
+    color: #4a3f8a;
+}
+
+.hibernate-btn:hover {
+    background-color: #d9d5f2;
+    transform: translateY(-2px);
+}
+
 .loading-message {
     text-align: center;
     color: #666;
@@ -247,6 +267,38 @@
 
 .modal-form {
     padding: 2rem;
+}
+
+/* Terminal Info modal */
+.info-modal {
+    max-width: 440px;
+}
+
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid #eee;
+}
+
+.info-row:last-child {
+    border-bottom: none;
+}
+
+.info-label {
+    color: #637AB9;
+    font-weight: 600;
+    font-size: 0.9rem;
+    white-space: nowrap;
+}
+
+.info-value {
+    color: #333;
+    font-size: 0.95rem;
+    text-align: right;
+    word-break: break-word;
 }
 
 .form-group {
@@ -517,6 +569,36 @@ body.dark-mode .terminal-status.active {
 body.dark-mode .terminal-status.hibernated {
     background: #5b52a3;
     color: #ffffff;
+}
+
+body.dark-mode .info-btn {
+    background: #2472c8;
+    color: #ffffff;
+}
+
+body.dark-mode .info-btn:hover {
+    background: #1a5da3;
+}
+
+body.dark-mode .hibernate-btn {
+    background: #5b52a3;
+    color: #ffffff;
+}
+
+body.dark-mode .hibernate-btn:hover {
+    background: #4a4285;
+}
+
+body.dark-mode .info-row {
+    border-bottom-color: #3e3e42;
+}
+
+body.dark-mode .info-label {
+    color: #9aa8e0;
+}
+
+body.dark-mode .info-value {
+    color: #d4d4d4;
 }
 
 body.dark-mode .terminal-status.resuming {

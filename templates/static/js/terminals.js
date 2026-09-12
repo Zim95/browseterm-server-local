@@ -132,6 +132,10 @@ class TerminalsHandler {
         // Track containers pending "Running" status - auto-cleanup on failure
         // Map of containerId -> { kubernetesId, networkName, userId }
         this.pendingContainers = new Map();
+        // Terminal IDs currently mid-hibernate (server-side save -> delete -> hibernate can take a
+        // while) - shown with their own loading state regardless of the row's last-known status,
+        // same idea as pendingContainers but for a manual action instead of creation.
+        this.hibernatingIds = new Set();
     }
 
     /**
@@ -170,6 +174,9 @@ class TerminalsHandler {
             modalOverlay: document.getElementById('modalOverlay'),
             modalClose: document.getElementById('modalClose'),
             cancelBtn: document.getElementById('cancelBtn'),
+            infoModalOverlay: document.getElementById('infoModalOverlay'),
+            infoModalClose: document.getElementById('infoModalClose'),
+            infoModalBody: document.getElementById('infoModalBody'),
             terminalForm: document.getElementById('terminalForm'),
             operatingSystemSelect: document.getElementById('operatingSystem'),
             cpuInput: document.getElementById('cpu'),
@@ -334,15 +341,28 @@ class TerminalsHandler {
      * @returns {string} HTML string for controls
      */
     getControlsHTML(terminalId, status, kubernetesId = null) {
+        // Hibernating (manual action, not a container `status` value of its own - see
+        // hibernatingIds) takes priority over whatever the row's last-known status is.
+        if (this.hibernatingIds.has(terminalId)) {
+            return `
+                <div class="terminal-loading">
+                    <span class="loading-spinner"></span>
+                    <span class="loading-text">Hibernating...</span>
+                </div>`;
+        }
+
         // Define controls configuration for each status
         const controlsConfig = {
             running: {
                 showPlay: true,
+                showInfo: true,
+                showHibernate: true,
                 showDelete: true,
                 showLoading: false
             },
             failed: {
                 showPlay: false,
+                showInfo: true,
                 showDelete: true,
                 showLoading: false
             },
@@ -363,6 +383,7 @@ class TerminalsHandler {
             },
             hibernated: {
                 showResume: true,
+                showInfo: true,
                 showDelete: true,
                 showLoading: false
             },
@@ -386,6 +407,18 @@ class TerminalsHandler {
             html += `
                 <button class="control-btn play-btn" data-terminal-id="${terminalId}">
                     <i class="fas fa-play"></i>
+                </button>`;
+        }
+        if (config.showInfo) {
+            html += `
+                <button class="control-btn info-btn" data-terminal-id="${terminalId}" title="Terminal info">
+                    <i class="fas fa-circle-info"></i>
+                </button>`;
+        }
+        if (config.showHibernate) {
+            html += `
+                <button class="control-btn hibernate-btn" data-terminal-id="${terminalId}" title="Hibernate">
+                    <i class="fas fa-moon"></i>
                 </button>`;
         }
         if (config.showResume) {
@@ -465,6 +498,18 @@ class TerminalsHandler {
             });
         }
 
+        // Info modal close buttons
+        if (this.elements.infoModalClose) {
+            this.elements.infoModalClose.addEventListener('click', () => this.closeInfoModal());
+        }
+        if (this.elements.infoModalOverlay) {
+            this.elements.infoModalOverlay.addEventListener('click', (e) => {
+                if (e.target === this.elements.infoModalOverlay) {
+                    this.closeInfoModal();
+                }
+            });
+        }
+
         // Form submission
         if (this.elements.terminalForm) {
             this.elements.terminalForm.addEventListener('submit', (e) => this.handleFormSubmit(e));
@@ -479,6 +524,8 @@ class TerminalsHandler {
      */
     attachTerminalControls() {
         const playBtns = document.querySelectorAll('.play-btn');
+        const infoBtns = document.querySelectorAll('.info-btn');
+        const hibernateBtns = document.querySelectorAll('.hibernate-btn');
         const resumeBtns = document.querySelectorAll('.resume-btn');
         const deleteBtns = document.querySelectorAll('.delete-btn');
 
@@ -486,6 +533,20 @@ class TerminalsHandler {
             btn.addEventListener('click', (e) => {
                 const terminalId = e.target.closest('button').getAttribute('data-terminal-id');
                 this.handlePlay(terminalId);
+            });
+        });
+
+        infoBtns.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const terminalId = e.target.closest('button').getAttribute('data-terminal-id');
+                this.handleInfo(terminalId);
+            });
+        });
+
+        hibernateBtns.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const terminalId = e.target.closest('button').getAttribute('data-terminal-id');
+                this.handleHibernate(terminalId);
             });
         });
 
@@ -706,9 +767,12 @@ class TerminalsHandler {
             // Remove from pending tracking first
             this.pendingContainers.delete(containerId);
 
-            // Step 1: Delete from K8s (if we have the kubernetes_id)
+            // Step 1: Delete from K8s (if a pod was ever created). Passes the container's own DB
+            // id (containerId), not info.kubernetesId - container-maker resolves the live pod by
+            // its stable browseterm/container-id label (see delete_container_in_k8s's own
+            // comment in src/api_handlers.py), not by a possibly-stale cached pod UID.
             if (info.kubernetesId) {
-                await this.deleteContainerFromK8s(info.kubernetesId, info.networkName);
+                await this.deleteContainerFromK8s(containerId, info.networkName);
             }
 
             // Step 2: Delete from DB
@@ -732,6 +796,108 @@ class TerminalsHandler {
     handlePlay(terminalId) {
         console.log('Play button clicked for terminal:', terminalId);
         window.open(`/terminalpage?id=${terminalId}`, '_blank');
+    }
+
+    /**
+     * Handle info button click — fetch this container's full row (src/api_handlers.py:
+     * get_container_info) and show it in the info modal: resources, IP/port, status, timestamps.
+     * @param {string} terminalId - Terminal DB ID
+     */
+    async handleInfo(terminalId) {
+        try {
+            const response = await fetch(`/get-container-info/${terminalId}`);
+            const container = await response.json();
+            if (!response.ok) {
+                throw new Error(container.error || `HTTP ${response.status}`);
+            }
+            this.renderInfoModal(container);
+            this.elements.infoModalOverlay.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        } catch (error) {
+            TerminalsUtilities.showNotification('error', 'Could Not Load Info', error.message, 5000);
+        }
+    }
+
+    /**
+     * Populate the info modal body from a container row.
+     * @param {Object} container - Full container row from GET /get-container-info/{id}
+     */
+    renderInfoModal(container) {
+        const portMappings = Array.isArray(container.port_mappings) ? container.port_mappings : [];
+        const portsText = portMappings.length
+            ? portMappings.map((p) => `${p.publish_port}→${p.target_port}/${p.protocol || 'TCP'}`).join(', ')
+            : '-';
+        const createdAt = container.created_at ? new Date(container.created_at).toLocaleString() : '-';
+        const lastSavedAt = container.last_saved_at ? new Date(container.last_saved_at).toLocaleString() : 'Never';
+
+        const rows = [
+            ['Name', container.name || '-'],
+            ['Status', TerminalsUtilities.formatStatus(container.status || 'Unknown')],
+            ['CPU limit', container.cpu_limit ? `${container.cpu_limit} core(s)` : '-'],
+            ['Memory limit', container.memory_limit || '-'],
+            ['Storage limit', container.storage_limit || '-'],
+            ['IP address', container.ip_address || 'Pending...'],
+            ['Ports', portsText],
+            ['Created', createdAt],
+            ['Last saved', lastSavedAt],
+        ];
+
+        this.elements.infoModalBody.innerHTML = rows
+            .map(([label, value]) => `
+                <div class="info-row">
+                    <span class="info-label">${label}</span>
+                    <span class="info-value">${value}</span>
+                </div>
+            `)
+            .join('');
+    }
+
+    /**
+     * Close the info modal.
+     */
+    closeInfoModal() {
+        this.elements.infoModalOverlay.classList.remove('active');
+        document.body.style.overflow = '';
+    }
+
+    /**
+     * Handle hibernate button click — a RUNNING container: save a fresh snapshot, tear down the
+     * pod, and release this device's reserved capacity for it (src/api_handlers.py:
+     * hibernate_container mirrors the reaper's own save-confirm-delete-hibernate ordering exactly,
+     * just triggered manually instead of by idleness). Shows a per-row loading state for the
+     * duration - this can take a while (a real snapshot build+push), same as Resume's own
+     * synchronous wait.
+     * @param {string} terminalId - Terminal DB ID
+     */
+    async handleHibernate(terminalId) {
+        const terminal = this.terminals.find(t => t.id === terminalId);
+        const terminalName = terminal?.name || 'this terminal';
+        const confirmed = confirm(
+            `Hibernate "${terminalName}"? This saves a snapshot, stops it, and frees up this device's resources. It can be resumed later.`
+        );
+        if (!confirmed) return;
+
+        this.hibernatingIds.add(terminalId);
+        this.renderTerminalsList();
+
+        try {
+            const resp = await fetch('/hibernate-container', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container_id: terminalId })
+            });
+            const result = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                throw new Error(result.error || `HTTP ${resp.status}`);
+            }
+            TerminalsUtilities.showNotification('success', 'Hibernated', `Terminal "${terminalName}" is now hibernated.`, 4000);
+            this.refreshDeviceQuota();
+        } catch (e) {
+            TerminalsUtilities.showNotification('error', 'Hibernate Failed', e.message, 6000);
+        } finally {
+            this.hibernatingIds.delete(terminalId);
+            await this.loadTerminals();
+        }
     }
 
     /**
@@ -794,9 +960,14 @@ class TerminalsHandler {
                 4000
             );
 
-            // Step 3: Delete from K8s in the background (user doesn't need to wait)
+            // Step 3: Delete from K8s in the background (user doesn't need to wait). Passes
+            // terminalId (the container's own DB id), not kubernetesId - container-maker
+            // resolves the live pod by its stable browseterm/container-id label rather than
+            // trusting this possibly-stale cached pod UID (see src/api_handlers.py's
+            // delete_container_in_k8s comment). The DB row is already gone by this point (Step 1
+            // above), which is fine: the label lives on the pod itself, not the DB row.
             if (kubernetesId) {
-                this.deleteContainerFromK8s(kubernetesId, networkName).catch(err => {
+                this.deleteContainerFromK8s(terminalId, networkName).catch(err => {
                     console.error('Background K8s deletion failed:', err);
                 });
             }
@@ -1098,8 +1269,11 @@ class TerminalsHandler {
 
             if (updateResult.error) {
                 console.error('Update container error:', updateResult.error);
-                // Update failed - delete from K8s and DB, then refresh list
-                await this.deleteContainerFromK8s(k8sResult.container_id, `${userInfo.id}-namespace`);
+                // Update failed - delete from K8s and DB, then refresh list. dbResult.id (the DB
+                // id), not k8sResult.container_id (the pod's own UID) - container-maker resolves
+                // the live pod by its stable browseterm/container-id label instead, which was
+                // already stamped on this pod at creation time using this same DB id.
+                await this.deleteContainerFromK8s(dbResult.id, `${userInfo.id}-namespace`);
                 await this.deleteContainerFromDB(dbResult.id, userInfo.id);
                 await this.loadTerminals();
                 TerminalsUtilities.showNotification(

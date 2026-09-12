@@ -24,7 +24,7 @@ class TestCleanK8sErrorMessage(TestCase):
         result = clean_k8s_error_message(raw, fallback='fallback text')
         self.assertNotIn('HTTPHeaderDict', result)
         self.assertNotIn('Reason: Forbidden', result)
-        self.assertIn('resource limit', result)
+        self.assertIn('remaining capacity', result)
 
     def test_extracts_non_quota_message_from_embedded_json(self) -> None:
         raw = 'HTTP response body: {"kind":"Status","message":"namespace not found","code":404}'
@@ -34,7 +34,7 @@ class TestCleanK8sErrorMessage(TestCase):
     def test_matches_quota_phrase_without_json(self) -> None:
         raw = 'container creation failed: exceeded quota on namespace'
         result = clean_k8s_error_message(raw, fallback='fallback text')
-        self.assertIn('resource limit', result)
+        self.assertIn('remaining capacity', result)
 
     def test_falls_back_when_nothing_recognized(self) -> None:
         raw = 'some totally unrelated internal error'

@@ -5,6 +5,7 @@ Their job is to parse request data, call some class and return response data.
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import Request, HTTPException
@@ -531,16 +532,21 @@ async def delete_container_in_k8s(request: Request) -> JSONResponse:
     try:
         request_data: dict = await request.json()
 
-        # Note: The frontend sends 'container_id' but it's actually the kubernetes_id (pod UID)
-        # The naming is confusing but we maintain backward compatibility with frontend
+        # 'container_id' here is the container's own DATABASE id (matches save's convention -
+        # see container-maker/src/containers/containers.py's delete() docstring), NOT the pod's
+        # Kubernetes UID. container-maker resolves the live pod via its stable
+        # browseterm/container-id label (stamped from this same DB id at both create and resume
+        # time), not by trusting the DB's own possibly-stale cached kubernetes_id - a resume
+        # recreates the pod with a brand-new UID, and the old raw-UID match silently deleted
+        # nothing (while still reporting success) whenever that cached value had gone stale.
         #
         # network_name is always derived from the authenticated session, never the client body:
         # container-maker's delete only ever looks up pods/services/ingress WITHIN the given
         # namespace (see container-maker/src/containers/containers.py), so confining it to the
         # caller's own namespace fully prevents deleting another user's k8s resources regardless
-        # of which pod UID is supplied.
+        # of which id is supplied.
         delete_container_k8s_request = DeleteContainerK8SRequest(
-            container_id=request_data['container_id'],  # This is the pod UID from K8s
+            container_id=request_data['container_id'],  # the container's DB id
             network_name=f"{request.state.user_info['id']}-namespace"
         )
 
@@ -819,6 +825,109 @@ async def resume_container(request: Request) -> JSONResponse:
             except Exception:
                 pass
         return JSONResponse(content={'error': f"Error resuming container: {str(e)}"}, status_code=500)
+
+
+# How long to wait for a manually-triggered save to reach a confirmed terminal save_status before
+# giving up - generous, since a real snapshot build+push can genuinely take a while (see
+# container-maker's own IMAGE_BUILD_TIMEOUT_MINUTES/IMAGE_PUSH_TIMEOUT_MINUTES, 25 min each).
+_HIBERNATE_SAVE_WAIT_TIMEOUT_SECONDS = 300
+_HIBERNATE_SAVE_POLL_INTERVAL_SECONDS = 3
+
+
+@authenticate_session
+async def hibernate_container(request: Request) -> JSONResponse:
+    '''
+    POST /hibernate-container -- authenticated, manual counterpart to the reaper's own automatic
+    idle-hibernation (browseterm_workload/reaper/src/reaper.py): save -> confirm the save actually
+    reached Succeeded -> delete the pod -> Cloud's compound hibernate transition, in that exact
+    order and for the same reason the reaper enforces it - deleting the pod before a save is
+    CONFIRMED successful risks silently discarding whatever wasn't captured. A container the
+    reaper would eventually hibernate anyway for being idle can now also be hibernated on demand.
+
+    Synchronous like resume_container, not backgrounded like save_container's own async path:
+    save_container's 202-then-SSE pattern exists because nothing about a plain "Save" needs the
+    caller to wait, but hibernating needs a definitive success/failure outcome before this
+    terminal's controls can be re-enabled, and a failed save here never changes the container's own
+    `status` (it stays RUNNING, unlike a real state transition) - there is no SSE event a frontend
+    could wait on for that case. The frontend is expected to show its own loading state on this
+    one terminal row for the duration of the request instead.
+    '''
+    container_id = None
+    user_id = None
+    try:
+        request_data: dict = await request.json()
+        container_id = request_data['container_id']
+        user_id = request.state.user_info['id']
+
+        # Ownership-scoped lookup, same reasoning as every other container-mutating handler here -
+        # an id-only lookup would let any authenticated user hibernate (and disrupt) another
+        # user's running terminal.
+        row = await get_container_by_id(container_id, user_id)
+        if not row:
+            return JSONResponse(content={'error': f'Container {container_id} not found'}, status_code=404)
+        if row['status'] != ContainerStatus.RUNNING.value:
+            return JSONResponse(content={'error': 'Only a running terminal can be hibernated'}, status_code=409)
+        kubernetes_id = row.get('kubernetes_id')
+        if not kubernetes_id:
+            return JSONResponse(content={'error': 'Terminal has no active pod to hibernate'}, status_code=409)
+
+        network_name = f"{user_id}-namespace"
+        container_service = ContainerService()
+
+        # 1. trigger save - same PENDING/last_save_attempted_at contract save_container's own
+        #    handler uses (this IS a real save, not a lighter-weight variant).
+        await _set_save_status(container_id, user_id, SaveStatus.PENDING.value, stamp_attempt=True)
+        save_request = SaveContainerK8SRequest(container_id=container_id, network_name=network_name)
+        await container_service.save_container_in_k8s(save_request)
+
+        # 2. wait for a CONFIRMED terminal save_status - container-maker's snapshot Job reports
+        #    this asynchronously (P17), so it isn't known yet just because the call above returned.
+        #    Never proceed to delete on anything other than a confirmed Succeeded.
+        deadline = time.monotonic() + _HIBERNATE_SAVE_WAIT_TIMEOUT_SECONDS
+        save_status = None
+        while time.monotonic() < deadline:
+            current = await get_container_by_id(container_id, user_id)
+            save_status = current.get('save_status') if current else None
+            if save_status in (SaveStatus.SUCCEEDED.value, SaveStatus.FAILED.value):
+                break
+            await asyncio.sleep(_HIBERNATE_SAVE_POLL_INTERVAL_SECONDS)
+
+        if save_status != SaveStatus.SUCCEEDED.value:
+            logger.warning(
+                "hibernate: save did not succeed, leaving pod running",
+                extra={"container_id": container_id, "save_status": save_status},
+            )
+            return JSONResponse(
+                content={
+                    'error': (
+                        f"Could not hibernate: the snapshot did not complete successfully "
+                        f"(save_status={save_status or 'timed out'}). The terminal was left running."
+                    )
+                },
+                status_code=502,
+            )
+
+        # 3. delete the pod - ONLY after a confirmed successful save. container_id here is the
+        #    container's own DB id (matches save's convention - see container-maker's delete()
+        #    docstring): container-maker resolves the live pod via its stable
+        #    browseterm/container-id label, never by trusting the possibly-stale kubernetes_id
+        #    cached on this row.
+        await container_service.delete_container_in_k8s(
+            DeleteContainerK8SRequest(container_id=container_id, network_name=network_name)
+        )
+
+        # 4. Cloud's compound hibernate transition - status=HIBERNATED, device_id cleared, device
+        #    resource reservation released. Same endpoint P19's resume-rollback path already reuses.
+        await asyncio.to_thread(CloudClient().hibernate_container, container_id)
+
+        updated = await get_container_by_id(container_id, user_id)
+        logger.info("hibernate complete", extra={"container_id": container_id})
+        return JSONResponse(content={'status': 'hibernated', 'container': updated})
+    except HTTPException as e:
+        return JSONResponse(content={'error': e.detail}, status_code=e.status_code)
+    except Exception as e:
+        logger.error("hibernate failed", extra={"container_id": container_id}, exc_info=True)
+        return JSONResponse(content={'error': f"Error hibernating container: {str(e)}"}, status_code=500)
 
 
 @authenticate_session
