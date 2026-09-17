@@ -30,7 +30,7 @@ async def create_container_in_db(container_info: CreateContainerDBModel) -> Opti
         raise ValueError("Container name and user_id are required")
     try:
         client = CloudClient()
-        return client.create_container(container_info.to_dict())
+        return await client.create_container(container_info.to_dict())
     except CloudClientError as e:
         if e.status_code == 409:
             raise ContainerDBException(f"Container with name '{container_info.name}' already exists for this user.")
@@ -59,7 +59,7 @@ async def update_container_in_db(update_data: UpdateContainerDBModel) -> Optiona
 
     try:
         client = CloudClient()
-        return client.update_container(container_id, user_id, update_dict)
+        return await client.update_container(container_id, user_id, update_dict)
     except CloudClientError as e:
         raise ContainerDBException(f"Database operation failed: {e.message}")
 
@@ -75,7 +75,7 @@ async def delete_container(container_id: str, user_id: str) -> bool:
     '''
     try:
         client = CloudClient()
-        deleted = client.delete_container(container_id, user_id)
+        deleted = await client.delete_container(container_id, user_id)
         if not deleted:
             raise ValueError(
                 f"Container with ID '{container_id}' not found or you don't have permission to delete it."
@@ -90,7 +90,7 @@ async def get_container(get_container_data: GetContainerDBModel) -> Optional[Dic
     '''Get a container via Cloud's container API. Ensures that only the owner can access it.'''
     try:
         client = CloudClient()
-        return client.get_container(get_container_data.container_id, get_container_data.user_id)
+        return await client.get_container(get_container_data.container_id, get_container_data.user_id)
     except CloudClientError as e:
         logger.error(
             "error getting container",
@@ -103,7 +103,7 @@ async def list_user_containers(user_id: str, limit: Optional[int] = None, offset
     '''List all containers for a specific user via Cloud's container API.'''
     try:
         client = CloudClient()
-        return client.list_containers(user_id, limit=limit, offset=offset)
+        return await client.list_containers(user_id, limit=limit, offset=offset)
     except CloudClientError as e:
         logger.error("error listing containers", extra={"user_id": user_id})
         raise Exception(f"Database operation failed: {e.message}")
@@ -128,7 +128,7 @@ async def update_container_fields(container_id: str, user_id: str, fields: Dict[
     '''
     try:
         client = CloudClient()
-        return client.update_container(container_id, user_id, fields)
+        return await client.update_container(container_id, user_id, fields)
     except CloudClientError as e:
         logger.error(
             "error updating container fields", extra={"container_id": container_id, "user_id": user_id}

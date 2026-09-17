@@ -10,7 +10,7 @@ from src.authentication.authentication_helpers import (
     delete_session,
     authenticate_session,
 )
-from src.cloud_client.client import CloudClientError
+from src.cloud_client.client import CloudClient, CloudClientError
 from fastapi import Request
 from fastapi.responses import RedirectResponse
 
@@ -34,7 +34,7 @@ class TestAuthenticationHelpers(TestCase):
 
     @patch('src.authentication.authentication_helpers.CloudClient')
     def test_validate_session_valid(self, mock_client_cls) -> None:
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client.validate_session.return_value = {
             'is_valid': True, 'user_info': {'id': 'u1'}, 'subscription_info': {}, 'current_subscription_plan': {},
         }
@@ -47,7 +47,7 @@ class TestAuthenticationHelpers(TestCase):
     def test_validate_session_cloud_error_treated_as_invalid(self, mock_client_cls) -> None:
         '''A Cloud-call failure never raises out of validate_session - treated as not-valid, so
         a Cloud hiccup logs a user out rather than crashing the request.'''
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client.validate_session.side_effect = CloudClientError(0, 'connection refused')
         mock_client_cls.return_value = mock_client
 
@@ -56,7 +56,7 @@ class TestAuthenticationHelpers(TestCase):
 
     @patch('src.authentication.authentication_helpers.CloudClient')
     def test_delete_session_calls_cloud_client(self, mock_client_cls) -> None:
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client_cls.return_value = mock_client
 
         self.loop.run_until_complete(delete_session('s1'))
@@ -64,7 +64,7 @@ class TestAuthenticationHelpers(TestCase):
 
     @patch('src.authentication.authentication_helpers.CloudClient')
     def test_authenticate_session_decorator_success(self, mock_client_cls) -> None:
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client.validate_session.return_value = {
             'is_valid': True, 'user_info': {'id': 'u1', 'name': 'Test User'},
             'subscription_info': {'id': 'sub1'}, 'current_subscription_plan': {'id': 'plan1'},
@@ -99,7 +99,7 @@ class TestAuthenticationHelpers(TestCase):
 
     @patch('src.authentication.authentication_helpers.CloudClient')
     def test_authenticate_session_decorator_invalid_session(self, mock_client_cls) -> None:
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client.validate_session.return_value = {'is_valid': False}
         mock_client_cls.return_value = mock_client
 

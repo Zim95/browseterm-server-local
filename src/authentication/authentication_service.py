@@ -46,7 +46,7 @@ class AuthenticationService:
         see api_handlers.py's CSRF check on /logout and /device/bootstrap).
         '''
         try:
-            session_response: dict = CloudClient().redeem_handoff(code)
+            session_response: dict = await CloudClient().redeem_handoff(code)
         except CloudClientError as e:
             logger.warning("handoff redemption failed", extra={"status_code": e.status_code})
             return Response(

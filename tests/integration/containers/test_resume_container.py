@@ -15,6 +15,7 @@ import src.api_handlers as api_handlers
 
 # dto used to build a realistic ContainerService response
 from src.containers.dto.container_response_dto import ContainerResponseModel
+from src.cloud_client.client import CloudClient
 
 
 def _mock_request(body: dict, user_id: str = 'user-42') -> MagicMock:
@@ -79,7 +80,7 @@ class TestResumeContainer(TestCase):
             mock_service = MagicMock()
             mock_service.create_container_in_k8s = AsyncMock(return_value=self.response)
         if mock_cloud_client is None:
-            mock_cloud_client = MagicMock()
+            mock_cloud_client = MagicMock(spec=CloudClient)
             mock_cloud_client.resume_container.return_value = {**self.row, 'status': 'Resuming'}
 
         with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=self.row)), \
@@ -130,7 +131,7 @@ class TestResumeContainer(TestCase):
         back. Cloud's resume_container is called with (container_id, user_id) before
         ContainerService.create_container_in_k8s.'''
         manager = MagicMock()
-        mock_cloud_client = MagicMock()
+        mock_cloud_client = MagicMock(spec=CloudClient)
         mock_cloud_client.resume_container.return_value = {**self.row, 'status': 'Resuming'}
         manager.attach_mock(mock_cloud_client.resume_container, 'resume_container')
 
@@ -182,7 +183,7 @@ class TestResumeContainer(TestCase):
         race, or 400 - resolved device lacks capacity), nothing was reserved on Cloud's side, so
         Local must surface that status/error verbatim and never touch k8s.'''
         from src.cloud_client.client import CloudClientError
-        mock_cloud_client = MagicMock()
+        mock_cloud_client = MagicMock(spec=CloudClient)
         mock_cloud_client.resume_container.side_effect = CloudClientError(409, 'Container is not hibernated')
         result, _update, mock_service, _cloud = self._run_resume(
             {'container_id': self.container_id}, mock_cloud_client=mock_cloud_client
@@ -198,7 +199,7 @@ class TestResumeContainer(TestCase):
         a dangling device reservation forever.'''
         mock_service: MagicMock = MagicMock()
         mock_service.create_container_in_k8s = AsyncMock(side_effect=RuntimeError('pod start boom'))
-        mock_cloud_client = MagicMock()
+        mock_cloud_client = MagicMock(spec=CloudClient)
         mock_cloud_client.resume_container.return_value = {**self.row, 'status': 'Resuming'}
 
         with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=self.row)), \
@@ -338,7 +339,7 @@ class TestResumeEntitlementChecks(TestCase):
             container_name='my-container', container_id='new-pod-uid', container_ip='10.0.0.99',
             container_network='user-42-namespace', container_ports=[], associated_resources=[],
         ))
-        mock_cloud_client = MagicMock()
+        mock_cloud_client = MagicMock(spec=CloudClient)
         mock_cloud_client.resume_container.return_value = {**self.row, 'status': 'Resuming'}
 
         with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=self.row)), \

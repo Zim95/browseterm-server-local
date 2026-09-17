@@ -13,6 +13,7 @@ from fastapi import Request
 from fastapi.responses import Response
 
 import src.api_handlers as api_handlers
+from src.cloud_client.client import CloudClient
 
 CSRF_TOKEN = "csrf-abc123"
 
@@ -152,7 +153,7 @@ class TestAuthCallback(unittest.TestCase):
         mock_service = MagicMock()
         mock_service.complete_login_from_handoff = AsyncMock(return_value=self._login_response(user_id="u1"))
         mock_service_cls.return_value = mock_service
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client.create_device_bootstrap.return_value = "bootstrap-code-1"
         mock_client_cls.return_value = mock_client
 
@@ -178,7 +179,7 @@ class TestAuthCallback(unittest.TestCase):
         mock_service = MagicMock()
         mock_service.complete_login_from_handoff = AsyncMock(return_value=self._login_response())
         mock_service_cls.return_value = mock_service
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client.create_device_bootstrap.side_effect = CloudClientError(502, "boom")
         mock_client_cls.return_value = mock_client
 
@@ -230,7 +231,7 @@ class TestDeviceBootstrapCsrf(unittest.TestCase):
 
     @patch("src.api_handlers.CloudClient")
     def test_valid_csrf_calls_cloud_client(self, mock_client_cls):
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client.create_device_bootstrap.return_value = "bootstrap-code-1"
         mock_client_cls.return_value = mock_client
 

@@ -44,7 +44,7 @@ async def list_all_existing_images() -> List[Dict[str, Any]]:
     '''List all existing images via Cloud's read-only catalog API.'''
     try:
         client = CloudClient()
-        return client.list_images()
+        return await client.list_images()
     except CloudClientError as e:
         logger.error("error listing images", exc_info=True)
         raise Exception(f"Database operation failed: {e.message}")

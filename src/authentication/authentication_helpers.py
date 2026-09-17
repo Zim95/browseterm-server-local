@@ -23,7 +23,7 @@ async def validate_session(session_id: str) -> Dict[str, Any]:
     '''
     try:
         client = CloudClient()
-        return client.validate_session(session_id)
+        return await client.validate_session(session_id)
     except CloudClientError:
         return {"is_valid": False}
 
@@ -32,7 +32,7 @@ async def delete_session(session_id: str) -> None:
     '''Ask Cloud to delete this session (logout).'''
     try:
         client = CloudClient()
-        client.delete_session(session_id)
+        await client.delete_session(session_id)
     except CloudClientError as e:
         raise Exception(f"Error deleting session: {e.message}")
 

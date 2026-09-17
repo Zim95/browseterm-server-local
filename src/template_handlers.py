@@ -49,14 +49,14 @@ async def terminals(request: Request) -> HTMLResponse:
     images: list = await list_all_existing_images()
     active_device = None
     try:
-        active_device = CloudClient().get_active_device(request.state.user_info['id'])
+        active_device = await CloudClient().get_active_device(request.state.user_info['id'])
     except CloudClientError:
         logger.error("could not fetch active device for terminals page", exc_info=True)
     # P10: one-time-ish SSE token (see ~/browseterm/p.md's "P10" section) so the browser can
     # connect directly to Cloud's GET /events/stream for real-time container status updates -
     # Local no longer relays/polls for this itself.
     session_id = request.cookies.get('session')
-    sse_token = CloudClient().create_sse_token(session_id) if session_id else ''
+    sse_token = await CloudClient().create_sse_token(session_id) if session_id else ''
     return templates.TemplateResponse(
         "terminals.html",
         {
@@ -140,9 +140,9 @@ async def terminalpage(request: Request) -> HTMLResponse:
     
     # Generate one-time WebSocket token for this session (via Cloud - no direct Redis access)
     session_id = request.cookies.get('session')
-    ws_token = CloudClient().create_websocket_token(session_id) if session_id else ''
+    ws_token = await CloudClient().create_websocket_token(session_id) if session_id else ''
     # P10: SSE token for the browser's direct connection to Cloud's GET /events/stream.
-    sse_token = CloudClient().create_sse_token(session_id) if session_id else ''
+    sse_token = await CloudClient().create_sse_token(session_id) if session_id else ''
     return templates.TemplateResponse(
         "terminalpage.html",
         {
@@ -214,7 +214,7 @@ async def profile(request: Request) -> HTMLResponse:
     '''
     active_device = None
     try:
-        active_device = CloudClient().get_active_device(request.state.user_info['id'])
+        active_device = await CloudClient().get_active_device(request.state.user_info['id'])
     except CloudClientError:
         logger.error("could not fetch active device for profile page", exc_info=True)
     return templates.TemplateResponse(

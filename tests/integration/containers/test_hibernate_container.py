@@ -1,6 +1,7 @@
 # builtins
 import asyncio
 from unittest import TestCase
+from src.cloud_client.client import CloudClient
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # fastapi
@@ -55,7 +56,7 @@ class TestHibernateContainer(TestCase):
             mock_service.save_container_in_k8s = AsyncMock(return_value=MagicMock())
             mock_service.delete_container_in_k8s = AsyncMock(return_value=MagicMock())
         if mock_cloud_client is None:
-            mock_cloud_client = MagicMock()
+            mock_cloud_client = MagicMock(spec=CloudClient)
 
         get_container_mock = AsyncMock()
         if get_container_side_effect is not None:
@@ -108,7 +109,7 @@ class TestHibernateContainer(TestCase):
         mock_service.delete_container_in_k8s = AsyncMock(return_value=MagicMock())
         manager.attach_mock(mock_service.save_container_in_k8s, 'save_container_in_k8s')
         manager.attach_mock(mock_service.delete_container_in_k8s, 'delete_container_in_k8s')
-        mock_cloud_client = MagicMock()
+        mock_cloud_client = MagicMock(spec=CloudClient)
         manager.attach_mock(mock_cloud_client.hibernate_container, 'hibernate_container')
 
         result, _update, _service, _cloud = self._run(mock_service=mock_service, mock_cloud_client=mock_cloud_client)

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import Request
 
 import src.api_handlers as api_handlers
-from src.cloud_client.client import CloudClientError
+from src.cloud_client.client import CloudClient, CloudClientError
 
 USER_A = 'user-a'
 
@@ -25,7 +25,7 @@ def _mock_request(user_id: str = USER_A) -> MagicMock:
 class TestGetDeviceQuota(TestCase):
     def test_returns_the_active_device(self) -> None:
         device = {'id': 'device-1', 'available_cpu': 4, 'available_memory_bytes': 8_000_000_000}
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client.get_active_device.return_value = device
         with patch('src.api_handlers.CloudClient', return_value=mock_client):
             result = asyncio.run(api_handlers.get_device_quota.__wrapped__(request=_mock_request()))
@@ -35,7 +35,7 @@ class TestGetDeviceQuota(TestCase):
         mock_client.get_active_device.assert_called_once_with(USER_A)
 
     def test_fails_open_to_null_device_on_cloud_error(self) -> None:
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client.get_active_device.side_effect = CloudClientError(500, 'Cloud unreachable')
         with patch('src.api_handlers.CloudClient', return_value=mock_client):
             result = asyncio.run(api_handlers.get_device_quota.__wrapped__(request=_mock_request()))

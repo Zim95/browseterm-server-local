@@ -17,6 +17,7 @@ Redis, gRPC, or k8s is touched.
 import asyncio
 from types import SimpleNamespace
 from unittest import TestCase
+from src.cloud_client.client import CloudClient
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # fastapi
@@ -285,7 +286,7 @@ class TestResumeContainerOwnership(TestCase):
             container_name='b-container', container_id='new-pod-uid', container_ip='10.0.0.9',
             container_network=f'{USER_A}-namespace', container_ports=[], associated_resources=[],
         ))
-        mock_cloud_client = MagicMock()
+        mock_cloud_client = MagicMock(spec=CloudClient)
         mock_cloud_client.resume_container.return_value = dict(row, status=ContainerStatus.RESUMING.value)
         request = _mock_request(body={'container_id': self.container_id}, user_id=USER_A)
         with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=row)), \

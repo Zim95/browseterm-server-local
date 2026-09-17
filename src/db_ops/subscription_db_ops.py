@@ -26,7 +26,7 @@ async def list_all_existing_subscription_types() -> Optional[List[Dict[str, Any]
     '''List all existing subscription types via Cloud's read-only catalog API.'''
     try:
         client = CloudClient()
-        return client.list_subscription_types()
+        return await client.list_subscription_types()
     except CloudClientError as e:
         logger.error("error listing all existing subscription types", exc_info=True)
         raise Exception(f"Database operation failed: {e.message}")
@@ -40,7 +40,7 @@ async def get_user_current_subscription_plan(data: GetUserSubscriptionPlanModel)
     '''
     try:
         client = CloudClient()
-        return client.get_current_subscription(data.user_id)
+        return await client.get_current_subscription(data.user_id)
     except CloudClientError as e:
         logger.error("error getting user current subscription plan", extra={"user_id": data.user_id}, exc_info=True)
         raise Exception(f"Database operation failed: {e.message}")

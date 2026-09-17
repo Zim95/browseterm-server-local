@@ -7,7 +7,7 @@ import json
 
 # local
 from src.authentication.authentication_service import AuthenticationService, CSRF_COOKIE_NAME
-from src.cloud_client.client import CloudClientError
+from src.cloud_client.client import CloudClient, CloudClientError
 from fastapi.responses import Response
 
 
@@ -28,7 +28,7 @@ class TestCompleteLoginFromHandoff(TestCase):
 
     @patch('src.authentication.authentication_service.CloudClient')
     def test_valid_handoff_establishes_session_and_csrf_cookies(self, mock_client_cls) -> None:
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client.redeem_handoff.return_value = {
             'session_id': 'test-session-123',
             'user_info': {'id': 'u1', 'name': 'Test User'},
@@ -49,7 +49,7 @@ class TestCompleteLoginFromHandoff(TestCase):
 
     @patch('src.authentication.authentication_service.CloudClient')
     def test_invalid_or_expired_handoff_returns_error_response(self, mock_client_cls) -> None:
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=CloudClient)
         mock_client.redeem_handoff.side_effect = CloudClientError(401, 'Invalid or expired handoff code')
         mock_client_cls.return_value = mock_client
 
