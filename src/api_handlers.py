@@ -132,7 +132,7 @@ async def auth_callback(request: Request) -> Response:
         try:
             session_data = json.loads(login_response.body)
             user_id = session_data["user_info"]["id"]
-            bootstrap_code = CloudClient().create_device_bootstrap(user_id)
+            bootstrap_code = await CloudClient().create_device_bootstrap(user_id)
             redirect_url = f"http://127.0.0.1:{desktop_port}/callback?code={bootstrap_code}"
         except (CloudClientError, KeyError, ValueError, TypeError):
             logger.error("desktop device bootstrap failed", exc_info=True)
@@ -200,7 +200,7 @@ async def device_bootstrap(request: Request) -> JSONResponse:
         return JSONResponse(content={"error": "Invalid CSRF token"}, status_code=403)
     user_id = request.state.user_info["id"]
     try:
-        code = CloudClient().create_device_bootstrap(user_id)
+        code = await CloudClient().create_device_bootstrap(user_id)
     except CloudClientError as e:
         logger.error("device bootstrap start failed", extra={"error": e.message})
         return JSONResponse(content={"error": "Could not start device bootstrap"}, status_code=502)
@@ -261,7 +261,7 @@ async def get_device_quota(request: Request) -> JSONResponse:
     "no device" the same way they handle "not fetched yet".
     '''
     try:
-        device = CloudClient().get_active_device(request.state.user_info['id'])
+        device = await CloudClient().get_active_device(request.state.user_info['id'])
     except CloudClientError:
         logger.error("could not fetch active device for quota refresh", exc_info=True)
         device = None
@@ -566,7 +566,10 @@ async def _set_save_status(container_id: str, user_id: str, save_status: str, sa
     (Pending)."""
     data = {"save_status": save_status, "save_error": save_error, "last_request_id": request_id_var.get()}
     if stamp_attempt:
-        data["last_save_attempted_at"] = datetime.now(timezone.utc)
+        # ISO string, not a raw datetime - this crosses the wire as JSON to Cloud (CloudClient's
+        # httpx request encodes the body with the stdlib json module, which has no idea how to
+        # serialize a datetime object at all).
+        data["last_save_attempted_at"] = datetime.now(timezone.utc).isoformat()
     await update_container_fields(container_id, user_id, data)
 
 
@@ -746,7 +749,7 @@ async def resume_container(request: Request) -> JSONResponse:
         # any pod-start attempt below. A non-2xx response here means resume never actually
         # started (nothing was reserved), so it's safe to just surface the error.
         try:
-            await asyncio.to_thread(CloudClient().resume_container, container_id, user_id)
+            await CloudClient().resume_container(container_id, user_id)
         except CloudClientError as e:
             logger.warning(
                 "resume rejected by Cloud", extra={"container_id": container_id, "status_code": e.status_code, "error": e.message},
@@ -816,7 +819,7 @@ async def resume_container(request: Request) -> JSONResponse:
             # releases the reservation, sets HIBERNATED), so it's reused as-is rather than just
             # marking FAILED, which would leave a dangling device reservation forever.
             try:
-                await asyncio.to_thread(CloudClient().hibernate_container, container_id)
+                await CloudClient().hibernate_container(container_id)
             except Exception:
                 logger.error("resume rollback (hibernate) also failed", extra={"container_id": container_id}, exc_info=True)
         elif container_id and user_id:
@@ -918,7 +921,7 @@ async def hibernate_container(request: Request) -> JSONResponse:
 
         # 4. Cloud's compound hibernate transition - status=HIBERNATED, device_id cleared, device
         #    resource reservation released. Same endpoint P19's resume-rollback path already reuses.
-        await asyncio.to_thread(CloudClient().hibernate_container, container_id)
+        await CloudClient().hibernate_container(container_id)
 
         updated = await get_container_by_id(container_id, user_id)
         logger.info("hibernate complete", extra={"container_id": container_id})
@@ -947,7 +950,7 @@ async def container_activity(request: Request) -> JSONResponse:
             return JSONResponse(content={'error': 'container_id is required'}, status_code=400)
         user_info = request.state.user_info
         user_id = user_info.id if hasattr(user_info, 'id') else user_info['id']
-        await update_container_fields(container_id, user_id, {"last_active_at": datetime.now(timezone.utc)})
+        await update_container_fields(container_id, user_id, {"last_active_at": datetime.now(timezone.utc).isoformat()})
         return JSONResponse(content={'status': 'ok'}, status_code=200)
     except Exception as e:
         return JSONResponse(content={'error': f"Error recording activity: {str(e)}"}, status_code=500)
