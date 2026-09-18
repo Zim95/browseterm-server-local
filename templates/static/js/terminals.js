@@ -40,7 +40,17 @@ class TerminalsUtilities {
         const device = TerminalsUtilities.getActiveDevice();
         if (!device || device.status !== 'Active' || device.tunnel_status !== 'Online') return false;
         if (!device.tunnel_last_heartbeat_at) return false;
-        const ageMs = Date.now() - new Date(device.tunnel_last_heartbeat_at).getTime();
+        // The DB column is a naive UTC datetime, so Python's isoformat() on it (e.g.
+        // "2026-09-18T17:17:43.389962") carries no timezone suffix at all. `new Date(...)` on a
+        // date-time string with no offset parses it as the BROWSER's LOCAL time, not UTC (a
+        // well-known JS Date gotcha) - in any timezone other than UTC this silently produces a
+        // wildly wrong age and always reads as "offline". Force UTC interpretation, matching the
+        // same "no tzinfo -> assume UTC" convention Cloud's own
+        // terminal_handlers.py::_tunnel_is_online already uses server-side.
+        const isoUtc = /[zZ]|[+-]\d{2}:?\d{2}$/.test(device.tunnel_last_heartbeat_at)
+            ? device.tunnel_last_heartbeat_at
+            : `${device.tunnel_last_heartbeat_at}Z`;
+        const ageMs = Date.now() - new Date(isoUtc).getTime();
         return Number.isFinite(ageMs) && ageMs <= 90 * 1000;
     }
 

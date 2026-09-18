@@ -16,11 +16,21 @@ const {
     TerminalsHandler,
 } = require(path.join(__dirname, '..', '..', 'templates', 'static', 'js', 'terminals.js'));
 
+// Real timestamps from Cloud's own device rows have no timezone suffix at all (a naive UTC
+// column, e.g. "2026-09-18T17:17:43.389962" - see the internal active-device response) - NOT the
+// 'Z'-suffixed form `new Date().toISOString()` produces. Using the real shape here is what
+// actually caught the "always reads offline outside UTC" bug (`new Date()` on a date-time
+// string with no offset parses as the *local* timezone, not UTC) - a 'Z'-suffixed fixture would
+// have masked it, which is exactly what happened before this test file was fixed.
+function naiveUtcNow(offsetMs = 0) {
+    return new Date(Date.now() + offsetMs).toISOString().replace('Z', '');
+}
+
 function onlineDevice(overrides = {}) {
     return {
         status: 'Active',
         tunnel_status: 'Online',
-        tunnel_last_heartbeat_at: new Date().toISOString(),
+        tunnel_last_heartbeat_at: naiveUtcNow(),
         ...overrides,
     };
 }
@@ -32,6 +42,15 @@ describe('TerminalsUtilities.isActiveDeviceTunnelOnline()', () => {
 
     test('true when the active device is Active with a fresh Online heartbeat', () => {
         window.activeDevice = onlineDevice();
+        expect(TerminalsUtilities.isActiveDeviceTunnelOnline()).toBe(true);
+    });
+
+    test('a naive (no timezone suffix) UTC-now heartbeat is still read as fresh, not stale', () => {
+        // Regression test: interpreting a naive UTC timestamp as local time silently adds the
+        // local UTC offset's worth of (usually several hours of) apparent age. This only holds
+        // for a non-UTC test runner - on a machine whose local zone genuinely is UTC there is no
+        // offset to misparse, so it can't observe this particular bug either way.
+        window.activeDevice = onlineDevice({ tunnel_last_heartbeat_at: naiveUtcNow() });
         expect(TerminalsUtilities.isActiveDeviceTunnelOnline()).toBe(true);
     });
 
@@ -52,7 +71,7 @@ describe('TerminalsUtilities.isActiveDeviceTunnelOnline()', () => {
 
     test('false when the last heartbeat is stale (> 90s old)', () => {
         window.activeDevice = onlineDevice({
-            tunnel_last_heartbeat_at: new Date(Date.now() - 120 * 1000).toISOString(),
+            tunnel_last_heartbeat_at: naiveUtcNow(-120 * 1000),
         });
         expect(TerminalsUtilities.isActiveDeviceTunnelOnline()).toBe(false);
     });
