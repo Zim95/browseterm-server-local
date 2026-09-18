@@ -156,8 +156,6 @@
     <script>
         // Pass terminal info from backend to JavaScript
         window.terminalInfo = {{ (terminalInfo or {}) | tojson | safe }};
-        window.socketSSHUrl = {{ (socketSSHUrl or '') | tojson | safe }};
-        window.wsToken = {{ (wsToken or '') | tojson | safe }};
         window.sseToken = {{ (sseToken or '') | tojson | safe }};
         window.cloudApiUrl = {{ (cloudApiUrl or '') | tojson | safe }};
         window.userInfo = {{ (userInfo or {}) | tojson | safe }};

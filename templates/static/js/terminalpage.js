@@ -21,22 +21,6 @@ class TerminalPageUtilities {
     }
 
     /**
-     * Get Socket SSH WebSocket URL from window object (passed from backend)
-     * @returns {string} WebSocket URL
-     */
-    static getSocketSSHUrl() {
-        return window.socketSSHUrl || '';
-    }
-
-    /**
-     * Get WebSocket token from window object (passed from backend)
-     * @returns {string} WebSocket token
-     */
-    static getWsToken() {
-        return window.wsToken || '';
-    }
-
-    /**
      * Get xterm theme configuration (terminal always uses dark theme)
      * @returns {Object} Xterm theme object
      */
@@ -119,11 +103,17 @@ class TerminalPageHandler {
         this.term = null;
         this.fitAddon = null;
         this.websocket = null;
-        this.socketSSHUrl = '';
-        this.wsToken = '';  // WebSocket authentication token
         this.sshHash = '';  // Unique hash for this SSH session
         this.isConnected = false;
         this.isSSHConnected = false;
+        // remotetunelling.md Phase 6/7: one of 'idle' | 'connecting' | 'authenticating' |
+        // 'connected' | 'reconnecting' | 'device-offline' | 'session-expired' |
+        // 'authorization-failed' | 'error'. Every terminal-session/ticket/WS step below funnels
+        // through setConnectionState() so this always reflects reality.
+        this.connectionState = 'idle';
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 5;
+        this.cleanedUp = false;  // set once by cleanup() - suppresses auto-reconnect on close
     }
 
     /**
@@ -135,12 +125,9 @@ class TerminalPageHandler {
         // Get terminal ID and info
         this.terminalId = TerminalPageUtilities.getTerminalIdFromURL();
         this.terminalInfo = TerminalPageUtilities.getTerminalInfoFromTemplate();
-        this.socketSSHUrl = TerminalPageUtilities.getSocketSSHUrl();
-        this.wsToken = TerminalPageUtilities.getWsToken();
-        
+
         console.log('Terminal ID:', this.terminalId);
         console.log('Terminal info:', this.terminalInfo);
-        console.log('Socket SSH URL:', this.socketSSHUrl);
 
         // Cache DOM elements
         this.cacheElements();
@@ -483,33 +470,78 @@ class TerminalPageHandler {
     }
 
     /**
-     * Connect to terminal via WebSocket
+     * Move to a new connection state, writing a one-time message to the terminal for it.
+     * Re-entering the same state (e.g. a second 'connecting' after a retry) still writes, since
+     * that repetition itself is useful signal to the user.
+     * @param {string} state
+     * @param {string} [detail] - extra context appended to the state's default message
      */
-    connectToTerminal() {
-        console.log('Connecting to terminal:', this.terminalInfo);
-
-        if (!this.socketSSHUrl) {
-            this.showError('WebSocket URL not configured');
-            return;
+    setConnectionState(state, detail) {
+        this.connectionState = state;
+        const messages = {
+            connecting: '\x1b[1;36mRequesting a terminal session...\x1b[0m',
+            authenticating: '\x1b[1;36m✓ Connected - authenticating...\x1b[0m',
+            connected: '\x1b[1;32m✓ Server ready\x1b[0m',
+            reconnecting: `\x1b[1;33mConnection lost - reconnecting (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})...\x1b[0m`,
+            'device-offline': '\x1b[1;31m✗ Your machine appears to be offline. Make sure BrowseTerm is running on it, then reload this page.\x1b[0m',
+            'session-expired': '\x1b[1;33mTerminal session expired - requesting a new one...\x1b[0m',
+            'authorization-failed': '\x1b[1;31m✗ You are not authorized to access this terminal.\x1b[0m',
+            error: '\x1b[1;31m✗ Could not connect to the terminal. Please reload the page.\x1b[0m',
+        };
+        const message = messages[state];
+        if (message) {
+            this.term.writeln(detail ? `${message} (${detail})` : message);
         }
+    }
 
-        if (!this.wsToken) {
-            this.showError('WebSocket authentication token not available');
+    /**
+     * Connect to terminal.
+     *
+     * remotetunelling.md Phase 5/6/7: no query-param token embedded at page load any more - each
+     * connection attempt fetches a brand-new single-use ticket + this device's current tunnel URL
+     * from /terminal-session (Local's own pass-through to Cloud) right before dialing, and the
+     * ticket is sent as the first WebSocket message rather than in the URL. A fresh fetch here is
+     * what makes reconnect-after-failure safe: a consumed or expired ticket can never be reused,
+     * so every (re)connect attempt must mint its own.
+     */
+    async connectToTerminal() {
+        console.log('Connecting to terminal:', this.terminalInfo);
+        this.setConnectionState('connecting');
+
+        let session;
+        try {
+            const resp = await fetch('/terminal-session', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ container_id: this.terminalInfo.id })
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                if (resp.status === 404) {
+                    this.setConnectionState('authorization-failed');
+                } else if (resp.status === 409) {
+                    this.setConnectionState('device-offline', err.error);
+                } else {
+                    this.setConnectionState('error', err.error);
+                }
+                return;
+            }
+            session = await resp.json();
+        } catch (error) {
+            console.error('Error requesting terminal session:', error);
+            this.setConnectionState('error', error.message);
             return;
         }
 
         try {
-            // Append WebSocket token to URL as query parameter
-            const wsUrl = `${this.socketSSHUrl}?token=${this.wsToken}`;
-            
-            // Create WebSocket connection to socket-ssh server
-            this.websocket = new WebSocket(wsUrl);
+            this.websocket = new WebSocket(session.websocket_url);
 
             this.websocket.onopen = () => {
                 console.log('WebSocket connected to socket-ssh server');
                 this.isConnected = true;
-                this.term.writeln('\x1b[1;32m✓ Connected to WebSocket server\x1b[0m');
-                this.term.writeln('\x1b[1;36m✓ Waiting for server to be ready...\x1b[0m');
+                this.reconnectAttempts = 0;
+                this.setConnectionState('authenticating');
+                this.websocket.send(JSON.stringify({ type: 'authenticate', data: { ticket: session.ticket } }));
                 this.markActivity();            // opening a terminal counts as activity
                 this.startActivityHeartbeat();  // keeps the session alive + feeds the reaper
             };
@@ -521,21 +553,48 @@ class TerminalPageHandler {
 
             this.websocket.onerror = (error) => {
                 console.error('WebSocket error:', error);
-                this.term.writeln('\x1b[1;31m✗ WebSocket connection error\x1b[0m');
-                this.showError('Failed to connect to terminal server');
             };
 
-            this.websocket.onclose = () => {
-                console.log('WebSocket disconnected');
+            this.websocket.onclose = (event) => {
+                console.log('WebSocket disconnected', event.code, event.reason);
                 this.isConnected = false;
                 this.isSSHConnected = false;
                 this.stopActivityHeartbeat();
-                this.term.writeln('\x1b[1;33m\r\nConnection closed.\x1b[0m');
+                if (this.cleanedUp) return;
+
+                // 4401 only ever happens during the authentication step (server.js's own
+                // gating) - the ticket we just sent was invalid, expired, or already consumed.
+                // Reconnecting doesn't need a backoff here: the fix is simply a fresh ticket.
+                if (event.code === 4401) {
+                    this.setConnectionState('session-expired');
+                    this.connectToTerminal();
+                    return;
+                }
+
+                this.attemptReconnect();
             };
         } catch (error) {
             console.error('Error creating WebSocket:', error);
-            this.showError(`Failed to connect: ${error.message}`);
+            this.setConnectionState('error', error.message);
         }
+    }
+
+    /**
+     * Reconnect after an unexpected transport-level drop (network blip, tunnel restart,
+     * socket-ssh pod restart), with capped exponential backoff. Gives up after
+     * maxReconnectAttempts rather than retrying forever.
+     */
+    attemptReconnect() {
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            this.setConnectionState('error', 'gave up after several reconnect attempts');
+            return;
+        }
+        this.reconnectAttempts += 1;
+        this.setConnectionState('reconnecting');
+        const delayMs = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 15000);
+        setTimeout(() => {
+            if (!this.cleanedUp) this.connectToTerminal();
+        }, delayMs);
     }
 
     /**
@@ -577,32 +636,22 @@ class TerminalPageHandler {
     }
 
     /**
-     * Initiate SSH connection through the WebSocket
+     * Initiate SSH connection through the WebSocket.
+     *
+     * remotetunelling.md Phase 7: no ssh_host/ssh_port/ssh_username/ssh_password here any more -
+     * socket-ssh resolves the actual target itself from the ticket it already consumed during
+     * authentication (see src/handler.js's SSHConnectHandler on the socket-ssh side). ssh_hash is
+     * just this session's own multiplexing id, not a target selector.
      */
     initiateSSHConnection() {
         console.log('Initiating SSH connection...');
 
-        if (!this.terminalInfo.sshUsername || !this.terminalInfo.sshPassword) {
-            this.showError('SSH credentials not available');
-            return;
-        }
-
-        // Send SSH connect request
         const sshConnectMessage = {
             type: 'sshConnect',
             data: {
-                ssh_hash: this.sshHash,
-                ssh_host: this.terminalInfo.ipAddress,
-                ssh_port: parseInt(this.terminalInfo.port),
-                ssh_username: this.terminalInfo.sshUsername,
-                ssh_password: this.terminalInfo.sshPassword
+                ssh_hash: this.sshHash
             }
         };
-
-        console.log('Sending SSH connect message:', {
-            ...sshConnectMessage,
-            data: { ...sshConnectMessage.data, ssh_password: '***' }
-        });
 
         this.websocket.send(JSON.stringify(sshConnectMessage));
         this.term.writeln('\x1b[1;36m✓ Initiating SSH connection...\x1b[0m');
@@ -617,10 +666,10 @@ class TerminalPageHandler {
             const data = JSON.parse(event.data);
             console.log('WebSocket message received:', data);
 
-            // Handle 'ready' message from server
+            // Handle 'ready' message from server (sent once socket-ssh has consumed our ticket)
             if (data.type === 'ready') {
                 console.log('Server ready - initiating SSH connection');
-                this.term.writeln('\x1b[1;36m✓ Server ready\x1b[0m');
+                this.setConnectionState('connected');
                 this.initiateSSHConnection();
                 return;
             }
@@ -717,6 +766,7 @@ class TerminalPageHandler {
      * Cleanup: close WebSocket and SSH connection
      */
     cleanup() {
+        this.cleanedUp = true;  // suppress attemptReconnect()/session-expired retry in onclose
         if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
             // Send SSH close message
             if (this.isSSHConnected) {

@@ -8,7 +8,6 @@ from fastapi import Request
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
 
-from src.common.config import SOCKET_SSH_WSS_URL
 from src.authentication.authentication_helpers import authenticate_session
 from src.cloud_client.client import CloudClient, CloudClientError
 from src.cloud_client.config import BROWSETERM_CLOUD_API_URL
@@ -138,9 +137,11 @@ async def terminalpage(request: Request) -> HTMLResponse:
                 "error": f"Error loading terminal: {str(e)}"
             }
     
-    # Generate one-time WebSocket token for this session (via Cloud - no direct Redis access)
+    # remotetunelling.md Phase 6: no WebSocket token minted at page-render time any more -
+    # terminalpage.js now calls POST /terminal-session (api_handlers.terminal_session) right
+    # before each connection attempt to get a fresh single-use ticket + this device's current
+    # tunnel URL, rather than embedding a token in the page that could go stale before use.
     session_id = request.cookies.get('session')
-    ws_token = await CloudClient().create_websocket_token(session_id) if session_id else ''
     # P10: SSE token for the browser's direct connection to Cloud's GET /events/stream.
     sse_token = await CloudClient().create_sse_token(session_id) if session_id else ''
     return templates.TemplateResponse(
@@ -148,8 +149,6 @@ async def terminalpage(request: Request) -> HTMLResponse:
         {
             "request": request,
             "terminalInfo": terminal_info,
-            "socketSSHUrl": SOCKET_SSH_WSS_URL,
-            "wsToken": ws_token,
             "sseToken": sse_token,
             "cloudApiUrl": BROWSETERM_CLOUD_API_URL,
             "userInfo": request.state.user_info
