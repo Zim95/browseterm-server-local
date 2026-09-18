@@ -152,9 +152,16 @@
     color: #333;
 }
 
-.play-btn:hover {
+.play-btn:hover:not(:disabled) {
     background-color: #8AE5B8;
     transform: translateY(-2px);
+}
+
+/* remotetunelling.md: Play disabled when the owning device/tunnel is offline (see
+   TerminalsUtilities.isActiveDeviceTunnelOnline in terminals.js). */
+.control-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 .delete-btn {

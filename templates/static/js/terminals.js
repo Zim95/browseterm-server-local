@@ -26,6 +26,25 @@ class TerminalsUtilities {
     }
 
     /**
+     * remotetunelling.md: "Play disabled when device/tunnel offline." Mirrors (approximately -
+     * this is a UX hint only) Cloud's own real enforcement in
+     * browseterm-server/src/cloud/terminal_handlers.py::_tunnel_is_online: the device must be
+     * Active, its tunnel Online, and its last heartbeat recent. The exact staleness threshold
+     * isn't exposed to the frontend, so this uses the same 90s default Cloud itself defaults to
+     * (TUNNEL_OFFLINE_THRESHOLD_SECONDS) - a real Play attempt is always re-validated
+     * server-side regardless of what this returns, so a mismatch here is only ever a stale-UI
+     * annoyance, never a security gap.
+     * @returns {boolean}
+     */
+    static isActiveDeviceTunnelOnline() {
+        const device = TerminalsUtilities.getActiveDevice();
+        if (!device || device.status !== 'Active' || device.tunnel_status !== 'Online') return false;
+        if (!device.tunnel_last_heartbeat_at) return false;
+        const ageMs = Date.now() - new Date(device.tunnel_last_heartbeat_at).getTime();
+        return Number.isFinite(ageMs) && ageMs <= 90 * 1000;
+    }
+
+    /**
      * Normalize a display name into a safe username: lowercase, underscores, alphanumerics only
      * @param {string} name
      * @returns {string}
@@ -404,8 +423,15 @@ class TerminalsHandler {
 
         let html = '';
         if (config.showPlay) {
-            html += `
+            const deviceOnline = TerminalsUtilities.isActiveDeviceTunnelOnline();
+            html += deviceOnline
+                ? `
                 <button class="control-btn play-btn" data-terminal-id="${terminalId}">
+                    <i class="fas fa-play"></i>
+                </button>`
+                : `
+                <button class="control-btn play-btn" data-terminal-id="${terminalId}" disabled
+                        title="Your machine is offline - start BrowseTerm on it to open this terminal">
                     <i class="fas fa-play"></i>
                 </button>`;
         }
@@ -1405,6 +1431,11 @@ class TerminalsHandler {
         this.elements.terminalsList.innerHTML = 
             `<div class="loading-message error">${message}</div>`;
     }
+}
+
+// Export for unit tests (Node/Jest). No-op in the browser where `module` is undefined.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { TerminalsUtilities, TerminalsHandler };
 }
 
 // Initialize terminals handler when DOM is ready
