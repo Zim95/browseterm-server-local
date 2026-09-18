@@ -291,14 +291,8 @@ class TestResumeContainerOwnership(TestCase):
         request = _mock_request(body={'container_id': self.container_id}, user_id=USER_A)
         with patch('src.api_handlers.get_container_by_id', AsyncMock(return_value=row)), \
              patch('src.api_handlers.update_container_fields', AsyncMock()), \
-             patch('src.api_handlers.list_user_containers_db', AsyncMock(return_value=[])), \
              patch('src.api_handlers.ContainerService', return_value=mock_service), \
-             patch('src.api_handlers.CloudClient', return_value=mock_cloud_client), \
-             patch('src.api_handlers.get_user_current_subscription_plan', AsyncMock(return_value={
-                 'name': 'Free', 'max_containers': 5,
-                 'cpu_limit_per_container': '1', 'memory_limit_per_container': '1Gi',
-                 'storage_limit_per_container': '2Gi',
-             })):
+             patch('src.api_handlers.CloudClient', return_value=mock_cloud_client):
             result = asyncio.run(api_handlers.resume_container.__wrapped__(request=request))
         self.assertEqual(result.status_code, 200)
         mock_cloud_client.resume_container.assert_called_once_with(self.container_id, USER_A)

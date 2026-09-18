@@ -24,10 +24,7 @@ from src.cloud_client.client import CloudClient, CloudClientError
 from src.cloud_client.config import BROWSETERM_CLOUD_API_URL
 from src.common.config import COOKIE_SECURE, COOKIE_SAMESITE
 from src.common.logging_setup import get_logger, request_id_var
-from src.db_ops.container_db_ops import get_container_by_id, list_user_containers as list_user_containers_db, update_container_fields
-from src.db_ops.subscription_db_ops import get_user_current_subscription_plan
-from src.db_ops.dto.subscription_dto import GetUserSubscriptionPlanModel
-from kubernetes.utils.quantity import parse_quantity
+from src.db_ops.container_db_ops import get_container_by_id, update_container_fields
 
 logger = get_logger("api_handlers")
 
@@ -625,51 +622,6 @@ async def save_container(request: Request) -> JSONResponse:
         return JSONResponse(content={'error': f"Error starting container save: {str(e)}"}, status_code=500)
 
 
-# Statuses that have (or are about to have) a live pod -- what counts against a tier's
-# max_containers concurrency limit. HIBERNATED/FAILED/etc. don't count, by design: hibernating
-# (deliberately or via crash recovery) is exactly how a user frees a slot without losing a
-# container's data, so it would be self-defeating for a hibernated row to still count as "active".
-_ACTIVE_CONTAINER_STATUSES = {ContainerStatus.PENDING.value, ContainerStatus.RUNNING.value, ContainerStatus.RESUMING.value}
-
-
-async def _count_active_containers(user_id: str, exclude_container_id: str) -> int:
-    '''Count this user's containers that currently have (or are about to have) a live pod,
-    excluding exclude_container_id itself -- the one about to be resumed, which is not active yet.'''
-    rows = await list_user_containers_db(user_id) or []
-    return sum(
-        1 for r in rows
-        if r["id"] != exclude_container_id
-        and r.get("deleted_at") is None
-        and r.get("status") in _ACTIVE_CONTAINER_STATUSES
-    )
-
-
-def _exceeds_tier_spec(container_row: dict, subscription_type: dict) -> bool:
-    '''True if this container's recorded resource limits exceed what the given subscription type
-    currently allows per container -- e.g. it was created/saved under a higher tier the user has
-    since downgraded from or lost. Fails open (returns False, i.e. allowed) on any unparseable
-    value (e.g. the Pro tier's placeholder "Configurable" limits) rather than incorrectly
-    blocking a resume over a value that was never meant to be compared numerically.'''
-    checks = (
-        ("cpu_limit", "cpu_limit_per_container"),
-        ("memory_limit", "memory_limit_per_container"),
-        ("storage_limit", "storage_limit_per_container"),
-    )
-    for container_key, tier_key in checks:
-        try:
-            container_value = parse_quantity(container_row.get(container_key))
-            tier_value = parse_quantity(subscription_type.get(tier_key))
-        except (ValueError, TypeError, ArithmeticError):
-            logger.warning(
-                "could not compare container spec against tier limit, allowing",
-                extra={"container_key": container_key, "tier_key": tier_key},
-            )
-            continue
-        if container_value > tier_value:
-            return True
-    return False
-
-
 @authenticate_session
 async def resume_container(request: Request) -> JSONResponse:
     '''
@@ -677,13 +629,10 @@ async def resume_container(request: Request) -> JSONResponse:
     image (falls back to the base image if it was never saved), reconstructing the create request
     from the stored row. The surviving/new Service routes to it via the app=<name> label.
 
-    Gated by the user's current subscription plan before anything is created: resuming must not
-    push them over their plan's concurrent-container limit, and the container's own recorded
-    resource spec must still fit within what the plan allows per container (covers a downgrade
-    since this container was last saved). Both checks fail open (log + allow) if the subscription
-    lookup itself errors -- a payments-system hiccup should never block a user from recovering
-    their own workspace, especially since this same endpoint is what crash recovery resumes
-    through too.
+    No subscription/plan gating here -- subscriptions don't gate anything about terminal creation
+    or resumption any more (per explicit request; see app.py's own note on /subscriptions being
+    disabled). The only real limit on concurrent containers is the owning device's actual quota,
+    enforced by container-maker/Cloud when the pod is actually created, not a plan tier.
     '''
     container_id = None
     user_id = None
@@ -695,52 +644,12 @@ async def resume_container(request: Request) -> JSONResponse:
 
         # Ownership-scoped lookup: an id-only lookup here would let any authenticated user
         # resume (and consume the compute/quota of) ANY other user's hibernated container just
-        # by knowing its id, before ever calling get_user_current_subscription_plan below with
-        # THAT container's own row['user_id'] -- i.e. it would use the victim's entitlement to
-        # authorize an action performed by the attacker's session. Scoping the lookup up front
-        # keeps every subsequent row['user_id'] reference (subscription/plan checks, network_name,
-        # environment, DB updates) tied to the caller who actually owns this container.
+        # by knowing its id.
         user_id = request.state.user_info['id']
         row: dict = await get_container_by_id(container_id, user_id)
         if not row:
             logger.warning("resume: container not found", extra={"container_id": container_id})
             return JSONResponse(content={'error': f'Container {container_id} not found'}, status_code=404)
-
-        try:
-            subscription_type = await get_user_current_subscription_plan(
-                GetUserSubscriptionPlanModel(user_id=row['user_id'])
-            )
-            active_count = await _count_active_containers(row['user_id'], container_id)
-            if active_count >= subscription_type['max_containers']:
-                logger.info(
-                    "resume blocked: over plan's container limit",
-                    extra={
-                        "container_id": container_id, "user_id": row['user_id'],
-                        "active_count": active_count, "max_containers": subscription_type['max_containers'],
-                    },
-                )
-                return JSONResponse(
-                    content={'error': (
-                        f"Only {subscription_type['max_containers']} terminal(s) allowed on "
-                        f"{subscription_type['name']}. Please hibernate or delete another "
-                        f"container to activate this one."
-                    )},
-                    status_code=409,
-                )
-            if _exceeds_tier_spec(row, subscription_type):
-                logger.info(
-                    "resume blocked: container spec exceeds current plan",
-                    extra={"container_id": container_id, "user_id": row['user_id'], "subscription_type": subscription_type.get('type')},
-                )
-                return JSONResponse(
-                    content={'error': (
-                        f"This terminal is ineligible for {subscription_type['name']}. "
-                        f"Please upgrade to continue using this container."
-                    )},
-                    status_code=409,
-                )
-        except Exception:
-            logger.error("entitlement check failed, allowing resume", extra={"container_id": container_id}, exc_info=True)
 
         # P19 (see ~/browseterm/p.md's "P19" section): Cloud validates the container is actually
         # HIBERNATED, resolves/validates the resuming device (this Mac's currently-active one -
