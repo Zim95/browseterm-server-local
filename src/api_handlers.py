@@ -830,6 +830,42 @@ async def resume_container(request: Request) -> JSONResponse:
         return JSONResponse(content={'error': f"Error resuming container: {str(e)}"}, status_code=500)
 
 
+@authenticate_session
+async def terminal_session(request: Request) -> JSONResponse:
+    '''
+    Authentication required. POST /terminal-session -- remotetunelling.md Phase 5/6: the
+    browser's "Play/Open Terminal" click starts here, not by calling Cloud directly. Cloud has no
+    established way to authenticate a browser session on its own (Local owns that cookie), so
+    this mirrors every other container-mutating endpoint in this file: the browser's session is
+    verified here, then Local calls Cloud server-to-server (already-trusted internal token) on
+    the caller's behalf. Cloud does the actual validation (ownership, RUNNING, device/tunnel
+    online) and mints the single-use ticket - this handler is a thin, ownership-scoped pass-through
+    to it, nothing more.
+    '''
+    try:
+        request_data: dict = await request.json()
+        container_id = request_data['container_id']
+        user_id = request.state.user_info['id']
+
+        # Ownership-scoped lookup before ever reaching Cloud, same reasoning as every other
+        # handler here - Cloud's own internal endpoint re-checks ownership too (never trust a
+        # single layer for this), but failing fast here avoids leaking a 404-vs-409 distinction
+        # for a container this session was never allowed to know about in the first place.
+        row = await get_container_by_id(container_id, user_id)
+        if not row:
+            return JSONResponse(content={'error': f'Container {container_id} not found'}, status_code=404)
+
+        result = await CloudClient().create_terminal_session(container_id, user_id)
+        return JSONResponse(content=result)
+    except HTTPException as e:
+        return JSONResponse(content={'error': e.detail}, status_code=e.status_code)
+    except CloudClientError as e:
+        return JSONResponse(content={'error': e.message}, status_code=e.status_code or 500)
+    except Exception as e:
+        logger.error("terminal session request failed", exc_info=True)
+        return JSONResponse(content={'error': f"Error starting terminal session: {str(e)}"}, status_code=500)
+
+
 # How long to wait for a manually-triggered save to reach a confirmed terminal save_status before
 # giving up - generous, since a real snapshot build+push can genuinely take a while (see
 # container-maker's own IMAGE_BUILD_TIMEOUT_MINUTES/IMAGE_PUSH_TIMEOUT_MINUTES, 25 min each).

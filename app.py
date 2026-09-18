@@ -82,6 +82,9 @@ app.add_api_route(path="/save-container", endpoint=api_handlers.save_container, 
 app.add_api_route(path="/resume-container", endpoint=api_handlers.resume_container, methods=["POST"])
 app.add_api_route(path="/hibernate-container", endpoint=api_handlers.hibernate_container, methods=["POST"])
 app.add_api_route(path="/container-activity", endpoint=api_handlers.container_activity, methods=["POST"])
+# remotetunelling.md Phase 5/6 - "Play/Open Terminal" starts here, not by the browser calling
+# Cloud directly (see api_handlers.terminal_session's own docstring for why).
+app.add_api_route(path="/terminal-session", endpoint=api_handlers.terminal_session, methods=["POST"])
 
 
 if __name__ == "__main__":

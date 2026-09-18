@@ -199,6 +199,15 @@ class CloudClient:
             "POST", f"/containers/{container_id}/resume", json_body={"user_id": user_id}
         ))["container"]
 
+    async def create_terminal_session(self, container_id: str, user_id: str) -> dict:
+        """POST /internal/containers/{container_id}/terminal-session (remotetunelling.md Phase
+        5/6). Returns {websocket_url, ticket, expires_at} - Cloud has already validated ownership,
+        that the container is RUNNING, and that its device's tunnel is currently online. Raises
+        CloudClientError (404 not found/not owned, 409 not running or device offline)."""
+        return await self._request(
+            "POST", f"/internal/containers/{container_id}/terminal-session", json_body={"user_id": user_id}
+        )
+
     async def hibernate_container(self, container_id: str) -> None:
         """POST /internal/containers/{container_id}/hibernate (P18). No user_id needed - this is
         the same trusted-SYSTEM-caller route the reaper uses; Local reuses it as-is for P19's
