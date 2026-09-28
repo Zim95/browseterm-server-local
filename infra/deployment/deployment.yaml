@@ -273,3 +273,87 @@ spec:
             name: browseterm-server-service
             port:
               number: 9999
+---
+# Gives the local web UI (browseterm-server-service, the same Ingress backend above) a public,
+# outbound-dialed HTTPS endpoint, same pattern and same ngrok-credentials Secret as socket-ssh's
+# own ngrok-agent (see socket-ssh/infra/deployment/deployment.yaml) - a separate agent process
+# rather than a second tunnel on that one, so this Deployment can be added/removed independently
+# of the terminal tunnel it has no relationship to. Verified live 2026-09-19 that a second
+# concurrent agent session on the same authtoken is accepted (not rejected as a duplicate
+# session) and that traffic actually reaches browseterm-server (uvicorn) end to end.
+#
+# No tunnel_registrar sidecar here yet and this URL is not registered with Cloud - unlike
+# socket-ssh's tunnel, nothing currently reads this agent's public URL automatically. For now,
+# read it from this Pod's own inspection API (`kubectl exec` into the Pod and curl
+# localhost:4040/api/tunnels, or a short-lived `kubectl port-forward` to 4040) after it starts.
+# Port 4040 deliberately has no Service, same reasoning as socket-ssh's agent: keep the ngrok
+# inspection/admin API unreachable from anywhere but this Pod itself.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ngrok-agent-web
+  namespace: ${NAMESPACE}
+  labels:
+    app: ngrok-agent-web
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # only one agent should ever hold this authtoken's web tunnel at a time
+  selector:
+    matchLabels:
+      app: ngrok-agent-web
+  template:
+    metadata:
+      labels:
+        app: ngrok-agent-web
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: ngrok-agent
+        image: ngrok/ngrok@sha256:14d80d083e5b53145f416bbbd36238336c9de4016c43fd950eb2eb845670583b
+        imagePullPolicy: IfNotPresent
+        args:
+        - "http"
+        - "browseterm-server-service.${NAMESPACE}.svc.cluster.local:9999"
+        - "--log=stdout"
+        env:
+        - name: NGROK_AUTHTOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ngrok-credentials
+              key: NGROK_AUTHTOKEN
+        ports:
+        - name: inspect
+          containerPort: 4040
+          protocol: TCP
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /api/tunnels
+            port: 4040
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/tunnels
+            port: 4040
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 2
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
